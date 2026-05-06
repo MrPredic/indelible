@@ -1,7 +1,7 @@
 """Latency collector (P50, P95, mean)."""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
 from bedrock_attest.types import Signal
 

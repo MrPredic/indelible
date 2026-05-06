@@ -1,0 +1,14 @@
+[agent]
+name = "coding-agent"
+system_prompt = "You are an expert Python coding assistant. Write clean, idiomatic Python. Be concise."
+model = "ollama/qwen2.5:7b"
+provider_url = "http://localhost:11434"
+tolerance_default = 0.05
+
+[[tools]]
+name = "run_python"
+description = "Execute Python code and return stdout"
+
+[[tools]]
+name = "read_file"
+description = "Read a file from the filesystem"

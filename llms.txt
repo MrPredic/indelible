@@ -1,0 +1,62 @@
+# bedrock-attest
+
+> Behavioral attestation for AI agents — signed, verifiable, cross-provider.
+
+bedrock-attest creates a cryptographically signed behavioral fingerprint of your AI agent setup. Run `bedrock attest` once; run `bedrock verify` any time you suspect the model has changed.
+
+## Key concepts
+
+- **Fingerprint**: JSON file capturing 7 behavioral signals from a test suite run
+- **Attestation**: the process of running test inputs, collecting signals, signing the result
+- **Verification**: re-running the same test suite and comparing signals tolerance-aware
+- **Signal**: a single behavioral measurement (e.g. refusal_rate=0.05, latency_p50=0.3s)
+
+## CLI
+
+```
+bedrock init        # scaffold key + config
+bedrock attest      # produces bedrock.fingerprint.json + bedrock.sig
+bedrock verify      # exit 0=pass 1=warn 2=breach 3=error
+bedrock diff a b    # diff two fingerprints without re-attesting
+```
+
+## Python API
+
+```python
+from bedrock_attest.attest import attest
+from bedrock_attest.verify import verify
+from bedrock_attest.config import BedrockConfig
+
+config = BedrockConfig.from_toml("bedrock.toml")
+fp = attest(config, test_inputs=[...], model="claude-opus-4-7")
+report = verify("bedrock.fingerprint.json", config, "claude-opus-4-7", test_inputs=[...])
+```
+
+## Signals
+
+- `refusal_rate` — fraction of outputs matching refusal patterns
+- `latency` — P50/P95/mean response time in seconds
+- `vocab_entropy` — Shannon entropy of output vocabulary
+- `tool_distribution` — histogram of tool call frequencies
+- `tool_schema_hash` — SHA-256 of canonicalised tool schemas
+- `embedding_profile` — mean cosine similarity to output centroid (needs [deep])
+- `anchor_drift` — cosine distance from system prompt anchor (needs [deep])
+
+## Config format (bedrock.toml)
+
+```toml
+[agent]
+name = "my-agent"
+system_prompt = "You are a helpful assistant."
+model = "claude-opus-4-7"
+provider_url = "https://api.anthropic.com"
+tolerance_default = 0.05
+
+[[tools]]
+name = "search"
+description = "Search the web"
+```
+
+## Source
+
+https://github.com/MrPredic/bedrock-attest

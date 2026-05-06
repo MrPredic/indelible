@@ -22,7 +22,6 @@ class EmbeddingProfileCollector:
     ) -> Signal:
         try:
             from sentence_transformers import SentenceTransformer, util  # type: ignore
-            import numpy as np  # type: ignore
         except ImportError:
             logger.warning("sentence-transformers/numpy not available; skipping %s", self.name)
             return Signal(name=self.name, value=0.0)
@@ -30,8 +29,9 @@ class EmbeddingProfileCollector:
         if not outputs:
             return Signal(name=self.name, value=0.0)
 
+        import numpy as np  # type: ignore  # noqa: PLC0415
         model = SentenceTransformer("all-MiniLM-L6-v2")
-        embeddings = model.encode(outputs, convert_to_numpy=True)
+        embeddings = np.array(model.encode(outputs))
         centroid = embeddings.mean(axis=0)
         sims = [float(util.cos_sim(centroid, e)) for e in embeddings]
         mean_sim = sum(sims) / len(sims)
