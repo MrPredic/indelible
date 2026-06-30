@@ -1,9 +1,9 @@
-"""Tests for bedrock_attest.types."""
+"""Tests for indelible.types."""
 from dataclasses import FrozenInstanceError
 
 import pytest
 
-from bedrock_attest.types import Fingerprint, Signal, VerifyReport
+from indelible.types import Fingerprint, Signal, VerifyReport
 
 
 # --- Signal ---
@@ -45,6 +45,31 @@ def test_signal_from_dict_defaults():
     s = Signal.from_dict(d)
     assert s.tolerance == 0.05
     assert s.p50 is None
+
+
+def test_signal_from_dict_tolerance_null():
+    """tolerance=null in JSON must not raise TypeError."""
+    d = {"name": "refusal_rate", "value": 0.1, "tolerance": None}
+    s = Signal.from_dict(d)
+    assert s.tolerance == 0.05
+
+
+def test_signal_int_value_coerced_to_float():
+    """Signal(value=5) and Signal(value=5.0) must produce byte-identical JSON.
+    Otherwise sign/verify roundtrip can break for manually constructed Signals."""
+    import json
+    s_int = Signal(name="x", value=5, tolerance=1)
+    s_float = Signal(name="x", value=5.0, tolerance=1.0)
+    assert json.dumps(s_int.to_dict(), sort_keys=True) == json.dumps(s_float.to_dict(), sort_keys=True)
+    assert isinstance(s_int.value, float)
+    assert isinstance(s_int.tolerance, float)
+
+
+def test_signal_int_p50_p95_coerced_to_float():
+    s = Signal(name="x", value=0.1, p50=3, p95=7)
+    assert isinstance(s.p50, float)
+    assert isinstance(s.p95, float)
+    assert s.p50 == 3.0 and s.p95 == 7.0
 
 
 # --- Fingerprint ---
@@ -90,6 +115,50 @@ def test_fingerprint_to_dict_signals_is_list():
 def test_fingerprint_roundtrip_no_signals():
     fp = _make_fingerprint(signals=())
     assert Fingerprint.from_dict(fp.to_dict()) == fp
+
+
+# --- Signal.digest (exact-match signals) ---
+
+def test_signal_digest_default_none():
+    s = Signal("x", 0.0)
+    assert s.digest is None
+
+
+def test_signal_digest_roundtrip():
+    s = Signal("tool_schema_hash", 0.0, tolerance=0.0, digest="abc123" * 10 + "ab")
+    assert Signal.from_dict(s.to_dict()) == s
+    assert Signal.from_dict(s.to_dict()).digest == s.digest
+
+
+# --- Fingerprint.canonical_bytes() — sign/verify single source of truth ---
+
+def test_fingerprint_canonical_bytes_is_bytes():
+    fp = _make_fingerprint()
+    assert isinstance(fp.canonical_bytes(), bytes)
+
+
+def test_fingerprint_canonical_bytes_stable_across_construction_order():
+    """Two Fingerprints constructed with the same logical content must
+    produce byte-identical canonical_bytes() output, regardless of dict
+    insertion order. This is the property sign/verify depend on."""
+    fp1 = _make_fingerprint()
+    fp2 = _make_fingerprint()
+    assert fp1.canonical_bytes() == fp2.canonical_bytes()
+    assert fp1.canonical_digest() == fp2.canonical_digest()
+
+
+def test_fingerprint_canonical_bytes_changes_on_signal_value_change():
+    fp1 = _make_fingerprint()
+    fp2 = _make_fingerprint(signals=(Signal("refusal_rate", 0.99), Signal("latency", 0.3)))
+    assert fp1.canonical_bytes() != fp2.canonical_bytes()
+
+
+def test_fingerprint_canonical_bytes_int_vs_float_byte_stable():
+    """A Signal built with int vs float must produce identical canonical bytes —
+    otherwise sign-with-int / verify-after-roundtrip-as-float silently breaks."""
+    fp_int = _make_fingerprint(signals=(Signal("x", 5, tolerance=1),))
+    fp_float = _make_fingerprint(signals=(Signal("x", 5.0, tolerance=1.0),))
+    assert fp_int.canonical_bytes() == fp_float.canonical_bytes()
 
 
 # --- VerifyReport ---

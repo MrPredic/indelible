@@ -1,7 +1,7 @@
-"""Tests for bedrock_attest.config."""
+"""Tests for indelible.config."""
 import pytest
 
-from bedrock_attest.config import BedrockConfig
+from indelible.config import IndelibleConfig
 
 
 SAMPLE_TOOLS = [
@@ -27,7 +27,7 @@ description = "Writes a file"
 """
 
 
-def _make_config(**kwargs) -> BedrockConfig:
+def _make_config(**kwargs) -> IndelibleConfig:
     defaults = dict(
         agent_name="coding-agent",
         system_prompt="You are a helpful coding assistant.",
@@ -37,7 +37,7 @@ def _make_config(**kwargs) -> BedrockConfig:
         tolerance_default=0.05,
     )
     defaults.update(kwargs)
-    return BedrockConfig(**defaults)
+    return IndelibleConfig(**defaults)
 
 
 def test_config_creation():
@@ -64,29 +64,29 @@ def test_config_inequality():
 
 def test_config_roundtrip_dict():
     cfg = _make_config()
-    assert BedrockConfig.from_dict(cfg.to_dict()) == cfg
+    assert IndelibleConfig.from_dict(cfg.to_dict()) == cfg
 
 
 def test_config_roundtrip_toml(tmp_path):
     cfg = _make_config()
-    path = tmp_path / "bedrock.toml"
+    path = tmp_path / "indelible.toml"
     cfg.to_toml(path)
-    loaded = BedrockConfig.from_toml(path)
+    loaded = IndelibleConfig.from_toml(path)
     assert loaded == cfg
 
 
 def test_config_roundtrip_toml_no_tools(tmp_path):
     cfg = _make_config(tools=[])
-    path = tmp_path / "bedrock.toml"
+    path = tmp_path / "indelible.toml"
     cfg.to_toml(path)
-    loaded = BedrockConfig.from_toml(path)
+    loaded = IndelibleConfig.from_toml(path)
     assert loaded == cfg
 
 
 def test_config_from_toml_manual(tmp_path):
-    path = tmp_path / "bedrock.toml"
+    path = tmp_path / "indelible.toml"
     path.write_text(SAMPLE_TOML, encoding="utf-8")
-    cfg = BedrockConfig.from_toml(path)
+    cfg = IndelibleConfig.from_toml(path)
     assert cfg.agent_name == "coding-agent"
     assert cfg.model == "claude-opus-4-7"
     assert len(cfg.tools) == 2
@@ -96,7 +96,7 @@ def test_config_from_toml_missing_agent_section(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text("[other]\nfoo = 'bar'\n", encoding="utf-8")
     with pytest.raises(ValueError, match="agent"):
-        BedrockConfig.from_toml(path)
+        IndelibleConfig.from_toml(path)
 
 
 def test_config_from_toml_missing_required_field(tmp_path):
@@ -104,7 +104,7 @@ def test_config_from_toml_missing_required_field(tmp_path):
     # missing model + provider_url
     path.write_text("[agent]\nname = 'x'\nsystem_prompt = 'y'\n", encoding="utf-8")
     with pytest.raises(ValueError):
-        BedrockConfig.from_toml(path)
+        IndelibleConfig.from_toml(path)
 
 
 def test_canonical_hash_deterministic():
@@ -124,3 +124,57 @@ def test_canonical_hash_is_sha256():
     h = cfg.canonical_hash()
     assert len(h) == 64
     assert all(c in "0123456789abcdef" for c in h)
+
+
+# --- maintainer wiring (P0-4) ---
+
+def test_maintainer_default_empty():
+    cfg = _make_config()
+    assert cfg.maintainer == ""
+
+
+def test_maintainer_excluded_from_canonical_hash():
+    """Maintainer identifies WHO attested, not WHAT — must not invalidate
+    fingerprints when the on-call rotation changes."""
+    a = _make_config(maintainer="alice@x.com")
+    b = _make_config(maintainer="bob@x.com")
+    assert a.canonical_hash() == b.canonical_hash()
+
+
+def test_maintainer_roundtrip_toml(tmp_path):
+    cfg = _make_config(maintainer="alice@example.com")
+    path = tmp_path / "indelible.toml"
+    cfg.to_toml(path)
+    assert IndelibleConfig.from_toml(path).maintainer == "alice@example.com"
+
+
+# --- refusal_patterns wiring (P1-9) ---
+
+def test_refusal_patterns_default_none():
+    assert _make_config().refusal_patterns is None
+
+
+def test_refusal_patterns_roundtrip_toml(tmp_path):
+    custom = ["je ne peux pas", "no puedo"]
+    cfg = _make_config(refusal_patterns=custom)
+    path = tmp_path / "indelible.toml"
+    cfg.to_toml(path)
+    assert IndelibleConfig.from_toml(path).refusal_patterns == custom
+
+
+def test_refusal_patterns_in_canonical_hash():
+    """Different refusal patterns = different attested baseline →
+    canonical_hash MUST differ (otherwise verify could pass with patterns
+    that wouldn't match the original attest)."""
+    a = _make_config(refusal_patterns=["I cannot"])
+    b = _make_config(refusal_patterns=["je ne peux pas"])
+    assert a.canonical_hash() != b.canonical_hash()
+
+
+def test_refusal_patterns_none_keeps_legacy_hash_stable():
+    """Configs that don't set refusal_patterns must hash identically to
+    pre-P1 configs — backward compat for existing fingerprints."""
+    a = _make_config()  # refusal_patterns=None
+    a.refusal_patterns = None
+    b = _make_config()
+    assert a.canonical_hash() == b.canonical_hash()

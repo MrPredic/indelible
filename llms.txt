@@ -1,48 +1,87 @@
-# bedrock-attest
+# indelible
 
-> Behavioral attestation for AI agents — signed, verifiable, cross-provider.
+> Detect when your AI agent silently drifts. indelible captures a signed
+> behavioral fingerprint (refusal rate, latency, vocab entropy, tool-use
+> distribution) and re-runs it on demand — your CI gate for model-update day.
 
-bedrock-attest creates a cryptographically signed behavioral fingerprint of your AI agent setup. Run `bedrock attest` once; run `bedrock verify` any time you suspect the model has changed.
+## What problem this solves
+
+Model providers (Anthropic, OpenAI, Groq, Together) silently update their
+models. Your agent works today; tomorrow, after a quiet RLHF adjustment, it
+might refuse more requests, use tools differently, or talk noticeably terser.
+You usually find out when a customer notices first.
+
+indelible captures a **signed JSON fingerprint** of your agent's behavior
+on a fixed test set. On any later day — pre-deploy, scheduled CI, after a
+provider's announcement — `indelible verify` re-runs the same suite and tells
+you, signal by signal, what changed. Result: `pass` / `warn` / `breach`,
+exit codes 0 / 1 / 2.
+
+It is **offline-verifiable** (the signature lives in a file, not a service)
+and **cross-provider** (attest on Anthropic, verify on Groq if you want).
+The output is a single JSON file: diffable, signable, auditable.
 
 ## Key concepts
 
-- **Fingerprint**: JSON file capturing 7 behavioral signals from a test suite run
-- **Attestation**: the process of running test inputs, collecting signals, signing the result
-- **Verification**: re-running the same test suite and comparing signals tolerance-aware
-- **Signal**: a single behavioral measurement (e.g. refusal_rate=0.05, latency_p50=0.3s)
+- **Fingerprint**: JSON file capturing 7 behavioral signals from a test suite run.
+- **Attestation**: the process of running test inputs, collecting signals, signing the result.
+- **Verification**: re-running the same suite and comparing signals tolerance-aware.
+- **Signal**: a single behavioral measurement (`name`, `value`, optional `digest`, per-signal `tolerance`).
+- **`config_hash`**: SHA-256 of the canonical agent config — guards against verifying with a different system_prompt/tools.
+- **`test_set_hash`**: SHA-256 of the prompt list — guards against verifying with a different test set.
 
 ## CLI
 
 ```
-bedrock init        # scaffold key + config
-bedrock attest      # produces bedrock.fingerprint.json + bedrock.sig
-bedrock verify      # exit 0=pass 1=warn 2=breach 3=error
-bedrock diff a b    # diff two fingerprints without re-attesting
+indelible init                       # scaffold key + indelible.toml + prompts.json
+indelible attest                     # produces indelible.fingerprint.json + .sig + .sig.pub
+indelible verify                     # exit 0=pass 1=warn 2=breach 3=error
+indelible diff a.json b.json         # diff two fingerprints offline (no API calls)
+
+# Multi-agent repos: attest each agent into its own fingerprint
+indelible attest --config agents/coding.toml --out fingerprints/coding.json
+indelible verify --config agents/coding.toml --fp fingerprints/coding.json
 ```
 
 ## Python API
 
 ```python
-from bedrock_attest.attest import attest
-from bedrock_attest.verify import verify
-from bedrock_attest.config import BedrockConfig
+from indelible.attest import attest
+from indelible.verify import verify
+from indelible.config import IndelibleConfig
 
-config = BedrockConfig.from_toml("bedrock.toml")
-fp = attest(config, test_inputs=[...], model="claude-opus-4-7")
-report = verify("bedrock.fingerprint.json", config, "claude-opus-4-7", test_inputs=[...])
+config = IndelibleConfig.from_toml("indelible.toml")
+fp = attest(config, test_inputs=[...], model="claude-opus-4-7",
+            sign_key="~/.indelible/key.pem",
+            sig_out_path="indelible.fingerprint.json.sig")
+
+import json
+with open("indelible.fingerprint.json", "w") as f:
+    json.dump(fp.to_dict(), f, indent=2)
+
+report = verify("indelible.fingerprint.json", config, "claude-opus-4-7",
+                test_inputs=[...], sig_path="indelible.fingerprint.json.sig")
+if report.breached:
+    raise RuntimeError(report.summary())
 ```
 
 ## Signals
 
-- `refusal_rate` — fraction of outputs matching refusal patterns
-- `latency` — P50/P95/mean response time in seconds
-- `vocab_entropy` — Shannon entropy of output vocabulary
-- `tool_distribution` — histogram of tool call frequencies
-- `tool_schema_hash` — SHA-256 of canonicalised tool schemas
-- `embedding_profile` — mean cosine similarity to output centroid (needs [deep])
-- `anchor_drift` — cosine distance from system prompt anchor (needs [deep])
+| Signal | Default tolerance | Meaning |
+|---|---:|---|
+| `refusal_rate` | 0.10 (±10pp) | fraction of outputs matching refusal patterns |
+| `latency` | 0.30 (±300ms) | P50/P95/mean response time in seconds |
+| `vocab_entropy` | 0.50 (bits) | Shannon entropy of output vocabulary |
+| `tool_distribution` | 0.10 | histogram of tool-call frequencies |
+| `tool_schema_hash` | 0.00 (exact) | SHA-256 of canonicalised tool schemas — uses `digest` field, not numeric tolerance |
+| `embedding_profile` | 0.05 (cosine) | mean cosine similarity to output centroid (needs `[deep]` extra) |
+| `anchor_drift` | 0.05 (cosine) | cosine distance from system-prompt anchor (needs `[deep]` extra) |
 
-## Config format (bedrock.toml)
+Defaults documented in `docs/TOLERANCES.md`. Each Signal can override its own
+tolerance; collectors set sensible per-signal values, the dataclass default
+(0.05) applies only to hand-built Signals.
+
+## Config format (indelible.toml)
 
 ```toml
 [agent]
@@ -51,12 +90,158 @@ system_prompt = "You are a helpful assistant."
 model = "claude-opus-4-7"
 provider_url = "https://api.anthropic.com"
 tolerance_default = 0.05
+maintainer = "alice@example.com"   # signed into every fingerprint
+
+# Optional — override built-in English+German refusal patterns:
+[refusal]
+patterns = [
+    "I cannot",
+    "I'm not able to",
+    "ne peux pas",     # French
+    "no puedo",        # Spanish
+]
 
 [[tools]]
 name = "search"
 description = "Search the web"
 ```
 
+## How attest + verify work end-to-end
+
+1. `indelible init` generates an Ed25519 key at `~/.indelible/key.pem` and scaffolds `indelible.toml` + `prompts.json`.
+2. `indelible attest` reads the config, runs each prompt against the model, runs 7 collectors over the responses, builds a `Fingerprint` dataclass, signs `Fingerprint.canonical_bytes()` (sorted-keys JSON), writes:
+   - `indelible.fingerprint.json` — the fingerprint
+   - `indelible.fingerprint.json.sig` — Ed25519 signature
+   - `indelible.fingerprint.json.sig.pub` — companion public key (so verify is self-contained)
+3. `indelible verify` loads the fingerprint, validates the signature against the companion `.pub`, then re-runs attest on the current model and compares signal by signal. Context guards short-circuit early on `config_hash` or `test_set_hash` mismatch — saves the API budget for runs whose verdict is already breach.
+
+## When to use indelible
+
+- After model upgrades — verify behavior hasn't regressed before promoting to prod.
+- CI gate — fail the build if behavioral contract is breached (exit code 2).
+- EU AI Act baseline — fingerprints are "documented behavioral baselines."
+- Multi-provider comparison — same prompts, two providers, signed diff.
+
+## When NOT to use indelible
+
+- Real-time observability — use Langfuse, Helicone, or Arize Phoenix.
+- Quality / correctness testing — use Promptfoo or DeepEval. indelible checks distributions, not correctness.
+- Detecting bugs in your own code — that's what unit tests are for.
+- Detecting jailbreak / prompt-injection susceptibility — use Garak (NVIDIA) or PyRIT (Microsoft).
+
+## FAQ
+
+### How is this different from Promptfoo?
+Promptfoo is an eval framework: it asks "is this output correct on this prompt?" indelible asks "did the *distribution* of behavior change since last week?" They are complements: use Promptfoo for the quality dimension, indelible for behavioral consistency. Some teams gate CI on both.
+
+### Does it support Claude / OpenAI / Ollama / Groq?
+All four. Provider is auto-detected from the model string:
+- `claude-*` or `anthropic/*` → Anthropic Messages API
+- `ollama/*` → local Ollama daemon
+- everything else → generic OpenAI-compat (Groq, Together, vLLM, OpenAI proper)
+
+API keys are read from environment: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`. Ollama needs no key.
+
+### What's the EU AI Act angle?
+EU AI Act (Q3 2026) requires "documented baselines" for High-Risk AI systems. A signed `indelible.fingerprint.json` is exactly that artefact: a tamper-evident statement of "the agent behaved like *this* on *this* test set on *this* date." The maintainer field carries the attesting party.
+
+### How is this different from Sigstore / sigstore-a2a?
+Sigstore signs *code/identity*. The official `sigstore/sigstore-a2a` project (Linux Foundation, 2025–) signs A2A AgentCards — agent *identity*. indelible signs agent *behavior*: the actual statistical fingerprint produced by running the agent against a test suite. Conceptually closer to **in-toto** (attestations *about* artefact properties) than to Sigstore (signing the artefact itself).
+
+### How is this different from Arize Phoenix / WhyLabs / Galileo?
+Those are runtime observability platforms — they ingest live traces from your production traffic. indelible runs a fixed test suite offline and produces a signed JSON. Different surfaces:
+- runtime + dashboard ↔ CI + signed artefact
+- live traffic ↔ fixed test set
+- paid SaaS ↔ open-source CLI
+
+Use them together: Phoenix to watch prod, indelible to gate the deploy.
+
+### How is this different from drift-detector?
+[drift-detector](https://github.com/MrPredic/drift-detector) is a runtime drift-detection library — it watches behavior live and alerts on shift. indelible defines a **contract** *before* drift happens, signs it, and re-runs it on demand. Sibling projects, complementary surfaces.
+
+### Why is `tool_schema_hash` not numeric like the other signals?
+Because it's a SHA-256, not a measurement. Comparing two SHA-256 hashes via numeric tolerance is unsound — close-but-different schemas can land within tolerance and false-pass. So `tool_schema_hash` publishes its full hex in `Signal.digest` and verify does an exact byte-equality check; any tool-schema bit-flip is a breach.
+
+### How big is the fingerprint?
+Typical: ~1–2 KB JSON for 7 signals. Signature: 64 bytes. Public key: ~110 bytes PEM. Tiny enough to commit to the repo.
+
+### Is the public key embedded in the fingerprint?
+No, it's a companion file (`<fp>.sig.pub`). v0.1 design: explicit and inspectable. v0.2 plans an in-toto envelope where the cert chain travels with the artefact (cosign-style).
+
+## Quickstart with Anthropic (no Ollama needed)
+
+```python
+import os, json
+from indelible.attest import attest
+from indelible.verify import verify
+from indelible.config import IndelibleConfig
+
+assert os.environ.get("ANTHROPIC_API_KEY"), "set ANTHROPIC_API_KEY first"
+
+config = IndelibleConfig(
+    agent_name="quickstart",
+    system_prompt="You are a concise, helpful assistant.",
+    tools=[],
+    model="claude-haiku-4-5",
+    provider_url="https://api.anthropic.com",
+    maintainer="you@example.com",
+)
+inputs = [
+    "What is 2+2?",
+    "Write a Python one-liner to reverse a string.",
+    "Name three best practices for error handling.",
+]
+
+fp = attest(config, inputs, "claude-haiku-4-5")
+with open("indelible.fingerprint.json", "w") as f:
+    json.dump(fp.to_dict(), f, indent=2)
+
+# ... later, perhaps after a model update ...
+report = verify("indelible.fingerprint.json", config, "claude-haiku-4-5", inputs)
+print(report.summary())   # "Verification pass — refusal_rate: pass, latency: pass, ..."
+assert not report.breached, report.summary()
+```
+
+## Quickstart with Ollama (free / offline)
+
+```bash
+# Once: pull a model
+ollama pull qwen2.5:7b
+
+# Then:
+pip install indelible
+indelible init
+# edit indelible.toml — set model = "ollama/qwen2.5:7b"
+indelible attest
+indelible verify
+```
+
+## Provider exceptions (typed since v0.1)
+
+```python
+from indelible.providers import (
+    ProviderError,            # base — any HTTP error from a provider
+    ProviderAuthError,        # 401/403 — bad/missing API key, do not retry
+    ProviderRateLimitError,   # 429 — retry with exponential backoff
+    ProviderServerError,      # 5xx — provider outage, retry with backoff
+)
+```
+
+All four are `RuntimeError` subclasses, so existing `except RuntimeError`
+code keeps working — additive change.
+
 ## Source
 
-https://github.com/MrPredic/bedrock-attest
+- GitHub: https://github.com/MrPredic/indelible
+- PyPI: https://pypi.org/project/indelible/
+- Issues: https://github.com/MrPredic/indelible/issues
+- License: MIT
+
+## Prior art / related work
+
+- `sigstore/sigstore-a2a` — Sigstore for A2A AgentCards (signs identity, complementary)
+- arXiv 2601.17406 — "Fingerprinting AI Coding Agents on GitHub" (attribution research)
+- arXiv 2401.12255 — "Instructional Fingerprinting of LLMs" (model watermarking)
+- in-toto / SLSA — generic attestation framework + provenance levels
+- Promptfoo, DeepEval — eval frameworks (quality, not behavioral consistency)
+- Arize Phoenix, WhyLabs — runtime observability (live traces, not signed offline artefacts)

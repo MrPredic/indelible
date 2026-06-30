@@ -1,14 +1,15 @@
-"""CLI entry point: bedrock init | attest | verify | diff."""
+"""CLI entry point: indelible init | attest | verify | diff."""
 from __future__ import annotations
 
 import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
-    Encoding, NoEncryption, PrivateFormat, PublicFormat,
+    Encoding, NoEncryption, PrivateFormat,
 )
 
 GREEN  = "\033[92m"
@@ -16,11 +17,10 @@ YELLOW = "\033[93m"
 RED    = "\033[91m"
 RESET  = "\033[0m"
 
-BEDROCK_DIR  = Path.home() / ".bedrock-attest"
-KEY_PATH     = BEDROCK_DIR / "key.pem"
-PUB_PATH     = BEDROCK_DIR / "key.pub"
-FP_FILE      = Path("bedrock.fingerprint.json")
-TOML_FILE    = Path("bedrock.toml")
+INDELIBLE_DIR  = Path.home() / ".indelible"
+KEY_PATH     = INDELIBLE_DIR / "key.pem"
+FP_FILE      = Path("indelible.fingerprint.json")
+TOML_FILE    = Path("indelible.toml")
 PROMPTS_FILE = Path("prompts.json")
 
 _TOML_TEMPLATE = """\
@@ -30,6 +30,7 @@ system_prompt = "You are a helpful assistant."
 model = "claude-haiku-4-5"
 provider_url = "https://api.anthropic.com"
 tolerance_default = 0.05
+maintainer = "you@example.com"   # signed into every fingerprint — answers "who attested this?"
 """
 
 _PROMPTS_TEMPLATE = [
@@ -55,21 +56,20 @@ def _exit_code(overall: str) -> int:
 
 def cmd_init() -> int:
     try:
-        BEDROCK_DIR.mkdir(parents=True, exist_ok=True)
+        INDELIBLE_DIR.mkdir(parents=True, exist_ok=True)
 
         if KEY_PATH.exists():
             print(f"{YELLOW}Key already exists at {KEY_PATH} — skipping key generation.{RESET}")
         else:
             priv = Ed25519PrivateKey.generate()
             KEY_PATH.write_bytes(priv.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
-            PUB_PATH.write_bytes(priv.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo))
             print(f"{GREEN}✓{RESET} Key generated → {KEY_PATH}")
 
         if TOML_FILE.exists():
-            print(f"{YELLOW}bedrock.toml already exists — skipping.{RESET}")
+            print(f"{YELLOW}indelible.toml already exists — skipping.{RESET}")
         else:
             TOML_FILE.write_text(_TOML_TEMPLATE, encoding="utf-8")
-            print(f"{GREEN}✓{RESET} bedrock.toml scaffolded")
+            print(f"{GREEN}✓{RESET} indelible.toml scaffolded")
 
         if PROMPTS_FILE.exists():
             print(f"{YELLOW}prompts.json already exists — skipping.{RESET}")
@@ -77,7 +77,7 @@ def cmd_init() -> int:
             PROMPTS_FILE.write_text(json.dumps(_PROMPTS_TEMPLATE, indent=2), encoding="utf-8")
             print(f"{GREEN}✓{RESET} prompts.json scaffolded")
 
-        print("\nNext: edit bedrock.toml, fill in prompts.json, then run: bedrock attest")
+        print("\nNext: edit indelible.toml, fill in prompts.json, then run: indelible attest")
         return 0
 
     except Exception as exc:
@@ -87,21 +87,37 @@ def cmd_init() -> int:
 
 # ── attest ────────────────────────────────────────────────────────────────────
 
-def cmd_attest() -> int:
-    from bedrock_attest.attest import attest as _attest
-    from bedrock_attest.config import BedrockConfig
+def cmd_attest(
+    config_path: Optional[Path] = None,
+    out_path: Optional[Path] = None,
+    prompts_path: Optional[Path] = None,
+) -> int:
+    from indelible.attest import attest as _attest
+    from indelible.config import IndelibleConfig
+
+    toml_p = config_path if config_path else TOML_FILE
+    fp_p = out_path if out_path else FP_FILE
+    prompts_p = prompts_path if prompts_path else PROMPTS_FILE
 
     try:
-        config = BedrockConfig.from_toml(TOML_FILE)
-        inputs: list = json.loads(PROMPTS_FILE.read_text(encoding="utf-8"))
+        config = IndelibleConfig.from_toml(toml_p)
+        inputs: list = json.loads(prompts_p.read_text(encoding="utf-8"))
         sign_key = str(KEY_PATH) if KEY_PATH.exists() else None
+        # Sig + companion pub travel with the fingerprint, not with the key —
+        # so `git pull && indelible verify` finds them inside the project.
+        sig_out_path = str(fp_p) + ".sig" if sign_key else None
 
         print(f"Running {len(inputs)} test inputs against {config.model} …")
-        fp = _attest(config, inputs, config.model, sign_key=sign_key)
+        fp = _attest(
+            config, inputs, config.model,
+            sign_key=sign_key,
+            sig_out_path=sig_out_path,
+        )
 
-        FP_FILE.write_text(json.dumps(fp.to_dict(), indent=2), encoding="utf-8")
-        sig_note = f" + {KEY_PATH}.sig" if sign_key else ""
-        print(f"{GREEN}✓{RESET} {len(fp.signals)} signals attested → {FP_FILE}{sig_note}")
+        fp_p.parent.mkdir(parents=True, exist_ok=True)
+        fp_p.write_text(json.dumps(fp.to_dict(), indent=2), encoding="utf-8")
+        sig_note = f" + {sig_out_path}" if sig_out_path else ""
+        print(f"{GREEN}✓{RESET} {len(fp.signals)} signals attested → {fp_p}{sig_note}")
         return 0
 
     except Exception as exc:
@@ -111,16 +127,37 @@ def cmd_attest() -> int:
 
 # ── verify ────────────────────────────────────────────────────────────────────
 
-def cmd_verify() -> int:
-    from bedrock_attest.config import BedrockConfig
-    from bedrock_attest.verify import verify as _verify
+def cmd_verify(
+    config_path: Optional[Path] = None,
+    fp_path: Optional[Path] = None,
+    prompts_path: Optional[Path] = None,
+) -> int:
+    from indelible.config import IndelibleConfig
+    from indelible.verify import verify as _verify
+
+    toml_p = config_path if config_path else TOML_FILE
+    fp_p = fp_path if fp_path else FP_FILE
+    prompts_p = prompts_path if prompts_path else PROMPTS_FILE
 
     try:
-        config = BedrockConfig.from_toml(TOML_FILE)
-        inputs: list = json.loads(PROMPTS_FILE.read_text(encoding="utf-8"))
+        config = IndelibleConfig.from_toml(toml_p)
+        inputs: list = json.loads(prompts_p.read_text(encoding="utf-8"))
+
+        # Look next to the fingerprint first (new convention).
+        # Fall back to next-to-key for fingerprints attested before v0.1.0.
+        sig_path_new = str(fp_p) + ".sig"
+        sig_path_legacy = str(KEY_PATH) + ".sig"
+        if Path(sig_path_new).exists():
+            sig_arg: Optional[str] = sig_path_new
+        elif Path(sig_path_legacy).exists():
+            sig_arg = sig_path_legacy
+        else:
+            sig_arg = None
 
         print(f"Re-attesting {len(inputs)} inputs against {config.model} …")
-        report = _verify(str(FP_FILE), config, config.model, inputs)
+        if sig_arg:
+            print(f"  (verifying signature at {sig_arg})")
+        report = _verify(str(fp_p), config, config.model, inputs, sig_path=sig_arg)
 
         for name, verdict, detail in report.per_signal:
             print(f"  {_icon(verdict)} {name:<25} {detail}")
@@ -138,7 +175,7 @@ def cmd_verify() -> int:
 # ── diff ──────────────────────────────────────────────────────────────────────
 
 def cmd_diff(path_a: str, path_b: str) -> int:
-    from bedrock_attest.types import Fingerprint
+    from indelible.types import Fingerprint
 
     try:
         fp_a = Fingerprint.from_dict(json.loads(Path(path_a).read_text(encoding="utf-8")))
@@ -182,13 +219,30 @@ def cmd_diff(path_a: str, path_b: str) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="bedrock",
+        prog="indelible",
         description="Behavioral attestation for AI agents.",
     )
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
-    sub.add_parser("init",   help="Generate key + scaffold bedrock.toml and prompts.json")
-    sub.add_parser("attest", help="Run test suite, save bedrock.fingerprint.json")
-    sub.add_parser("verify", help="Re-attest and compare against saved fingerprint")
+    sub.add_parser("init",   help="Generate key + scaffold indelible.toml and prompts.json")
+
+    # `attest` and `verify` accept --config / --out / --prompts so a single
+    # repo can host multiple agents (e.g. fingerprints/coding.json + research.json).
+    attest_p = sub.add_parser("attest", help="Run test suite, save indelible.fingerprint.json")
+    attest_p.add_argument("--config",  type=Path, default=None,
+                          help="Path to indelible.toml (default: ./indelible.toml)")
+    attest_p.add_argument("--out",     type=Path, default=None,
+                          help="Where to write the fingerprint JSON (default: ./indelible.fingerprint.json)")
+    attest_p.add_argument("--prompts", type=Path, default=None,
+                          help="Path to prompts.json (default: ./prompts.json)")
+
+    verify_p = sub.add_parser("verify", help="Re-attest and compare against saved fingerprint")
+    verify_p.add_argument("--config",  type=Path, default=None,
+                          help="Path to indelible.toml (default: ./indelible.toml)")
+    verify_p.add_argument("--fp",      type=Path, default=None,
+                          help="Path to fingerprint to verify (default: ./indelible.fingerprint.json)")
+    verify_p.add_argument("--prompts", type=Path, default=None,
+                          help="Path to prompts.json (default: ./prompts.json)")
+
     diff_p = sub.add_parser("diff", help="Compare two fingerprint files without re-attesting")
     diff_p.add_argument("a", metavar="FINGERPRINT_A")
     diff_p.add_argument("b", metavar="FINGERPRINT_B")
@@ -198,9 +252,13 @@ def main() -> None:
     if args.cmd == "init":
         sys.exit(cmd_init())
     elif args.cmd == "attest":
-        sys.exit(cmd_attest())
+        sys.exit(cmd_attest(
+            config_path=args.config, out_path=args.out, prompts_path=args.prompts,
+        ))
     elif args.cmd == "verify":
-        sys.exit(cmd_verify())
+        sys.exit(cmd_verify(
+            config_path=args.config, fp_path=args.fp, prompts_path=args.prompts,
+        ))
     elif args.cmd == "diff":
         sys.exit(cmd_diff(args.a, args.b))
     else:

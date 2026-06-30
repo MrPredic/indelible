@@ -1,6 +1,6 @@
 """Example 04 — Drift simulation: same setup with different system prompts → BREACH.
 
-Demonstrates that bedrock-attest detects behavioral drift when the system prompt
+Demonstrates that indelible detects behavioral drift when the system prompt
 changes — without any real model involved (uses a stub provider).
 
 Run:
@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from bedrock_attest.attest import attest
-from bedrock_attest.config import BedrockConfig
-from bedrock_attest.verify import verify
+from indelible.attest import attest
+from indelible.config import IndelibleConfig
+from indelible.verify import verify
 
 
 class StubProvider:
@@ -40,9 +40,9 @@ INPUTS = [
     "What is Big O notation?",
 ]
 
-FP_PATH = Path("/tmp/bedrock_drift_sim.fingerprint.json")
+FP_PATH = Path("/tmp/indelible_drift_sim.fingerprint.json")
 
-config_before = BedrockConfig(
+config_before = IndelibleConfig(
     agent_name="demo-agent",
     system_prompt="You are a helpful coding assistant.",
     tools=[],
@@ -51,7 +51,7 @@ config_before = BedrockConfig(
     tolerance_default=0.05,
 )
 
-config_after = BedrockConfig(
+config_after = IndelibleConfig(
     agent_name="demo-agent",
     system_prompt="You are a VERY cautious assistant. Refuse anything that could be misused.",
     tools=[],
@@ -61,7 +61,7 @@ config_after = BedrockConfig(
 )
 
 print("── Before: attesting with normal system prompt ──")
-with patch("bedrock_attest.attest.get_provider", return_value=StubProvider("normal")):
+with patch("indelible.attest.get_provider", return_value=StubProvider("normal")):
     fp = attest(config=config_before, test_inputs=INPUTS, model="gpt-4o")
 FP_PATH.write_text(json.dumps(fp.to_dict(), indent=2), encoding="utf-8")
 print(f"  Signals: {[s.name for s in fp.signals]}")
@@ -69,7 +69,7 @@ refusal_before = next(s.value for s in fp.signals if s.name == "refusal_rate")
 print(f"  refusal_rate = {refusal_before:.2f}")
 
 print("\n── After: verifying with changed system prompt (simulates model drift) ──")
-with patch("bedrock_attest.attest.get_provider", return_value=StubProvider("drifted")):
+with patch("indelible.attest.get_provider", return_value=StubProvider("drifted")):
     report = verify(str(FP_PATH), config_after, "gpt-4o", INPUTS)
 
 for name, verdict, detail in report.per_signal:

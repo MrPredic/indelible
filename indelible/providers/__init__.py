@@ -4,11 +4,23 @@ from __future__ import annotations
 import os
 from typing import Optional, Protocol
 
-from bedrock_attest.providers.anthropic import AnthropicProvider
-from bedrock_attest.providers.ollama import OllamaProvider
-from bedrock_attest.providers.openai_compat import OpenAICompatProvider
+from indelible.providers.anthropic import AnthropicProvider
+from indelible.providers.errors import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderServerError,
+    raise_for_status,
+)
+from indelible.providers.ollama import OllamaProvider
+from indelible.providers.openai_compat import OpenAICompatProvider
 
-__all__ = ["Provider", "get_provider", "OpenAICompatProvider", "AnthropicProvider", "OllamaProvider"]
+__all__ = [
+    "Provider", "get_provider",
+    "OpenAICompatProvider", "AnthropicProvider", "OllamaProvider",
+    "ProviderError", "ProviderAuthError", "ProviderRateLimitError", "ProviderServerError",
+    "raise_for_status",
+]
 
 
 class Provider(Protocol):

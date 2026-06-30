@@ -1,11 +1,11 @@
-"""BedrockConfig — loads/saves agent attestation configuration."""
+"""IndelibleConfig — loads/saves agent attestation configuration."""
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 try:
     import tomllib  # stdlib Python 3.11+
@@ -15,7 +15,7 @@ except ImportError:
 import tomli_w
 
 
-class BedrockConfig:
+class IndelibleConfig:
     """Agent configuration for behavioral attestation.
 
     TOML format::
@@ -40,6 +40,8 @@ class BedrockConfig:
         model: str,
         provider_url: str,
         tolerance_default: float = 0.05,
+        maintainer: str = "",
+        refusal_patterns: Optional[List[str]] = None,
     ) -> None:
         self.agent_name = agent_name
         self.system_prompt = system_prompt
@@ -47,9 +49,14 @@ class BedrockConfig:
         self.model = model
         self.provider_url = provider_url
         self.tolerance_default = tolerance_default
+        self.maintainer = maintainer
+        # None = use collector defaults; explicit list = override
+        self.refusal_patterns: Optional[List[str]] = (
+            list(refusal_patterns) if refusal_patterns is not None else None
+        )
 
     @classmethod
-    def from_toml(cls, path: Union[str, Path]) -> BedrockConfig:
+    def from_toml(cls, path: Union[str, Path]) -> IndelibleConfig:
         """Load config from a TOML file.
 
         Raises ValueError if required fields are missing.
@@ -65,6 +72,9 @@ class BedrockConfig:
             if field not in agent:
                 raise ValueError(f"Missing required field 'agent.{field}' in config TOML")
 
+        refusal_section = data.get("refusal", {})
+        refusal_patterns = refusal_section.get("patterns") if isinstance(refusal_section, dict) else None
+
         return cls(
             agent_name=agent["name"],
             system_prompt=agent["system_prompt"],
@@ -72,26 +82,37 @@ class BedrockConfig:
             model=agent["model"],
             provider_url=agent["provider_url"],
             tolerance_default=agent.get("tolerance_default", 0.05),
+            maintainer=agent.get("maintainer", ""),
+            refusal_patterns=refusal_patterns,
         )
 
     def to_toml(self, path: Union[str, Path]) -> None:
         """Write config to a TOML file."""
-        data: Dict[str, Any] = {
-            "agent": {
-                "name": self.agent_name,
-                "system_prompt": self.system_prompt,
-                "model": self.model,
-                "provider_url": self.provider_url,
-                "tolerance_default": self.tolerance_default,
-            },
+        agent: Dict[str, Any] = {
+            "name": self.agent_name,
+            "system_prompt": self.system_prompt,
+            "model": self.model,
+            "provider_url": self.provider_url,
+            "tolerance_default": self.tolerance_default,
         }
+        if self.maintainer:
+            agent["maintainer"] = self.maintainer
+        data: Dict[str, Any] = {"agent": agent}
         if self.tools:
             data["tools"] = self.tools
+        if self.refusal_patterns is not None:
+            data["refusal"] = {"patterns": self.refusal_patterns}
         with open(path, "wb") as f:
             tomli_w.dump(data, f)
 
     def to_dict(self) -> dict:
-        return {
+        # NOTE: `maintainer` is intentionally NOT part of the canonical config
+        # dict — it identifies *who* attested, not *what* was attested.
+        # Including it would cause a maintainer change (new team member,
+        # email change) to invalidate every existing fingerprint.
+        # `refusal_patterns` IS part of canonical: different patterns = different
+        # refusal_rate baseline = different "what was attested".
+        d: dict = {
             "agent_name": self.agent_name,
             "system_prompt": self.system_prompt,
             "tools": copy.deepcopy(self.tools),
@@ -99,9 +120,12 @@ class BedrockConfig:
             "provider_url": self.provider_url,
             "tolerance_default": self.tolerance_default,
         }
+        if self.refusal_patterns is not None:
+            d["refusal_patterns"] = list(self.refusal_patterns)
+        return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> BedrockConfig:
+    def from_dict(cls, d: dict) -> IndelibleConfig:
         return cls(
             agent_name=d["agent_name"],
             system_prompt=d["system_prompt"],
@@ -109,6 +133,8 @@ class BedrockConfig:
             model=d["model"],
             provider_url=d["provider_url"],
             tolerance_default=d.get("tolerance_default", 0.05),
+            maintainer=d.get("maintainer", ""),
+            refusal_patterns=d.get("refusal_patterns"),
         )
 
     def canonical_hash(self) -> str:
@@ -117,9 +143,9 @@ class BedrockConfig:
         return hashlib.sha256(canonical.encode()).hexdigest()
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, BedrockConfig):
+        if not isinstance(other, IndelibleConfig):
             return NotImplemented
         return self.to_dict() == other.to_dict()
 
     def __repr__(self) -> str:
-        return f"BedrockConfig(agent_name={self.agent_name!r}, model={self.model!r})"
+        return f"IndelibleConfig(agent_name={self.agent_name!r}, model={self.model!r})"

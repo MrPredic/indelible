@@ -21,3 +21,7 @@ env/
 .vscode/
 *.swp
 .DS_Store
+
+# Internal-only working docs (pre-release review, strategy, funding notes)
+reviews/
+REVIEW_PLAN.md

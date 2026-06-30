@@ -1,12 +1,17 @@
-"""Tests for bedrock_attest.providers.*"""
+"""Tests for indelible.providers.*"""
 import pytest
 from unittest.mock import patch, MagicMock
 
-from bedrock_attest.providers import (
+from indelible.providers import (
     AnthropicProvider,
     OllamaProvider,
     OpenAICompatProvider,
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderServerError,
     get_provider,
+    raise_for_status,
 )
 
 
@@ -22,12 +27,28 @@ def _mock_resp(status: int, data: dict) -> MagicMock:
 
 def test_openai_basic():
     resp = _mock_resp(200, {"choices": [{"message": {"content": "Hello"}}]})
-    with patch("bedrock_attest.providers.openai_compat.httpx.post", return_value=resp):
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
         p = OpenAICompatProvider("https://api.example.com", "gpt-4o", "key-x")
         content, tools, latency = p.complete("sys", "hi")
     assert content == "Hello"
     assert tools == []
     assert latency >= 0.0
+
+
+def test_openai_content_zero_string():
+    """Content='0' must not be coerced to empty string."""
+    resp = _mock_resp(200, {"choices": [{"message": {"content": "0"}}]})
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
+        content, _, _ = OpenAICompatProvider("https://api.example.com", "gpt-4o").complete("s", "u")
+    assert content == "0"
+
+
+def test_openai_content_null_becomes_empty():
+    """content=null in response must become empty string, not crash."""
+    resp = _mock_resp(200, {"choices": [{"message": {"content": None}}]})
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
+        content, _, _ = OpenAICompatProvider("https://api.example.com", "gpt-4o").complete("s", "u")
+    assert content == ""
 
 
 def test_openai_tool_calls():
@@ -40,7 +61,7 @@ def test_openai_tool_calls():
             ],
         }}]
     })
-    with patch("bedrock_attest.providers.openai_compat.httpx.post", return_value=resp):
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
         p = OpenAICompatProvider("https://api.example.com", "gpt-4o")
         _, tools, _ = p.complete("sys", "hi")
     assert tools == ["search", "read_file"]
@@ -48,7 +69,7 @@ def test_openai_tool_calls():
 
 def test_openai_no_api_key_no_auth_header():
     resp = _mock_resp(200, {"choices": [{"message": {"content": "ok"}}]})
-    with patch("bedrock_attest.providers.openai_compat.httpx.post", return_value=resp) as mock_post:
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp) as mock_post:
         OpenAICompatProvider("https://api.example.com", "model").complete("s", "u")
     _, kwargs = mock_post.call_args
     headers = kwargs.get("headers", mock_post.call_args[1].get("headers", {}))
@@ -57,16 +78,62 @@ def test_openai_no_api_key_no_auth_header():
 
 def test_openai_http_error():
     resp = _mock_resp(500, {})
-    with patch("bedrock_attest.providers.openai_compat.httpx.post", return_value=resp):
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
+        # Existing RuntimeError contract preserved (typed exceptions subclass it)
         with pytest.raises(RuntimeError, match="500"):
             OpenAICompatProvider("https://api.example.com", "m").complete("s", "u")
+
+
+def test_openai_500_raises_typed_server_error():
+    """P1-8: 5xx must raise ProviderServerError (still a RuntimeError subclass)."""
+    resp = _mock_resp(503, {})
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
+        with pytest.raises(ProviderServerError) as ei:
+            OpenAICompatProvider("https://api.example.com", "m").complete("s", "u")
+    assert ei.value.status_code == 503
+
+
+def test_openai_401_raises_typed_auth_error():
+    resp = _mock_resp(401, {})
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
+        with pytest.raises(ProviderAuthError) as ei:
+            OpenAICompatProvider("https://api.example.com", "m").complete("s", "u")
+    assert ei.value.status_code == 401
+
+
+def test_openai_429_raises_typed_rate_limit():
+    resp = _mock_resp(429, {})
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp):
+        with pytest.raises(ProviderRateLimitError) as ei:
+            OpenAICompatProvider("https://api.example.com", "m").complete("s", "u")
+    assert ei.value.status_code == 429
+
+
+def test_typed_exceptions_are_runtime_error_subclasses():
+    """Backward compat: existing `except RuntimeError` must still catch."""
+    assert issubclass(ProviderError, RuntimeError)
+    assert issubclass(ProviderAuthError, ProviderError)
+    assert issubclass(ProviderRateLimitError, ProviderError)
+    assert issubclass(ProviderServerError, ProviderError)
+
+
+def test_raise_for_status_200_is_noop():
+    raise_for_status(200, "ignored")  # must not raise
+
+
+def test_raise_for_status_unknown_status_raises_base():
+    with pytest.raises(ProviderError) as ei:
+        raise_for_status(418, "I'm a teapot")
+    assert ei.value.status_code == 418
+    # Must NOT be one of the more specific subclasses
+    assert not isinstance(ei.value, (ProviderAuthError, ProviderRateLimitError, ProviderServerError))
 
 
 # --- AnthropicProvider ---
 
 def test_anthropic_basic():
     resp = _mock_resp(200, {"content": [{"type": "text", "text": "Hello Claude"}]})
-    with patch("bedrock_attest.providers.anthropic.httpx.post", return_value=resp):
+    with patch("indelible.providers.anthropic.httpx.post", return_value=resp):
         p = AnthropicProvider("claude-opus-4-7", "sk-ant-xxx")
         content, tools, latency = p.complete("sys", "hi")
     assert content == "Hello Claude"
@@ -80,7 +147,7 @@ def test_anthropic_tool_use_blocks():
         {"type": "tool_use", "name": "search"},
         {"type": "tool_use", "name": "read_file"},
     ]})
-    with patch("bedrock_attest.providers.anthropic.httpx.post", return_value=resp):
+    with patch("indelible.providers.anthropic.httpx.post", return_value=resp):
         content, tools, _ = AnthropicProvider("claude-opus-4-7", "key").complete("s", "u")
     assert content == "I'll search for that."
     assert tools == ["search", "read_file"]
@@ -92,15 +159,28 @@ def test_anthropic_tool_first_text_second():
         {"type": "tool_use", "name": "think"},
         {"type": "text", "text": "Done."},
     ]})
-    with patch("bedrock_attest.providers.anthropic.httpx.post", return_value=resp):
+    with patch("indelible.providers.anthropic.httpx.post", return_value=resp):
         content, tools, _ = AnthropicProvider("claude-opus-4-7", "key").complete("s", "u")
     assert content == "Done."
     assert tools == ["think"]
 
 
+def test_anthropic_multiple_text_blocks_concatenated():
+    """Anthropic can return text → tool_use → text. All text must be captured."""
+    resp = _mock_resp(200, {"content": [
+        {"type": "text",     "text": "Let me search. "},
+        {"type": "tool_use", "name": "search"},
+        {"type": "text",     "text": "Found it."},
+    ]})
+    with patch("indelible.providers.anthropic.httpx.post", return_value=resp):
+        content, tools, _ = AnthropicProvider("claude-opus-4-7", "key").complete("s", "u")
+    assert content == "Let me search. Found it."
+    assert tools == ["search"]
+
+
 def test_anthropic_http_error():
     resp = _mock_resp(401, {})
-    with patch("bedrock_attest.providers.anthropic.httpx.post", return_value=resp):
+    with patch("indelible.providers.anthropic.httpx.post", return_value=resp):
         with pytest.raises(RuntimeError, match="401"):
             AnthropicProvider("claude-opus-4-7", "bad-key").complete("s", "u")
 
@@ -109,7 +189,7 @@ def test_anthropic_http_error():
 
 def test_ollama_basic():
     resp = _mock_resp(200, {"message": {"content": "Bonjour"}})
-    with patch("bedrock_attest.providers.ollama.httpx.post", return_value=resp):
+    with patch("indelible.providers.ollama.httpx.post", return_value=resp):
         p = OllamaProvider("ollama/llama3.3")
         content, tools, latency = p.complete("sys", "hi")
     assert content == "Bonjour"
@@ -124,7 +204,7 @@ def test_ollama_prefix_stripped():
 
 def test_ollama_http_error():
     resp = _mock_resp(500, {})
-    with patch("bedrock_attest.providers.ollama.httpx.post", return_value=resp):
+    with patch("indelible.providers.ollama.httpx.post", return_value=resp):
         with pytest.raises(RuntimeError, match="500"):
             OllamaProvider("ollama/m").complete("s", "u")
 

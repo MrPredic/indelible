@@ -1,18 +1,18 @@
-"""Tests for bedrock_attest.collectors.*"""
+"""Tests for indelible.collectors.*"""
 import sys
 from unittest.mock import MagicMock
 
 import pytest
 
-from bedrock_attest.collectors import Collector
-from bedrock_attest.collectors.anchor_drift import AnchorDriftCollector
-from bedrock_attest.collectors.embedding_profile import EmbeddingProfileCollector
-from bedrock_attest.collectors.latency import LatencyCollector
-from bedrock_attest.collectors.refusal import RefusalCollector
-from bedrock_attest.collectors.tool_distribution import ToolDistributionCollector
-from bedrock_attest.collectors.tool_schema_hash import ToolSchemaHashCollector
-from bedrock_attest.collectors.vocab_entropy import VocabEntropyCollector
-from bedrock_attest.types import Signal
+from indelible.collectors import Collector
+from indelible.collectors.anchor_drift import AnchorDriftCollector
+from indelible.collectors.embedding_profile import EmbeddingProfileCollector
+from indelible.collectors.latency import LatencyCollector
+from indelible.collectors.refusal import RefusalCollector
+from indelible.collectors.tool_distribution import ToolDistributionCollector
+from indelible.collectors.tool_schema_hash import ToolSchemaHashCollector
+from indelible.collectors.vocab_entropy import VocabEntropyCollector
+from indelible.types import Signal
 
 # helpers
 _CALL = dict(inputs=["What is 2+2?"], anchor_text="You are a helpful assistant.", tools_called=[])
@@ -62,6 +62,26 @@ def test_refusal_empty_outputs():
     assert s.value == 0.0
 
 
+def test_refusal_default_tolerance_is_010():
+    """P1-1: refusal_rate default tolerance must be 0.10, not the 0.05 floor."""
+    s = _collect(RefusalCollector(), ["I cannot help."])
+    assert s.tolerance == 0.10
+
+
+def test_refusal_custom_patterns():
+    """P1-9: RefusalCollector accepts custom patterns for non-English agents."""
+    fr_patterns = [r"je ne peux pas", r"désolé.*impossible"]
+    c = RefusalCollector(patterns=fr_patterns)
+    # Default English phrases should NOT match anymore
+    s = _collect(c, ["I cannot help.", "Je ne peux pas faire ça."])
+    assert s.value == pytest.approx(0.5)
+
+
+def test_refusal_empty_patterns_raises():
+    with pytest.raises(ValueError, match="non-empty"):
+        RefusalCollector(patterns=[])
+
+
 # --- LatencyCollector ---
 
 def test_latency_values():
@@ -85,6 +105,25 @@ def test_latency_single():
     c.set_latencies([1.5])
     s = _collect(c, ["ok"])
     assert s.value == pytest.approx(1.5)
+
+
+def test_latency_default_tolerance_is_030():
+    """P1-1: latency default tolerance must be 0.30 (300ms), the only value
+    that doesn't breach-storm in CI for slow providers."""
+    c = LatencyCollector()
+    c.set_latencies([0.1])
+    s = _collect(c, ["ok"])
+    assert s.tolerance == 0.30
+
+
+def test_vocab_entropy_default_tolerance_is_050():
+    s = _collect(VocabEntropyCollector(), ["word word word"])
+    assert s.tolerance == 0.50
+
+
+def test_tool_distribution_default_tolerance_is_010():
+    s = _collect(ToolDistributionCollector(), ["ok"], tools_called=[[]])
+    assert s.tolerance == 0.10
 
 
 # --- VocabEntropyCollector ---
@@ -145,8 +184,26 @@ def test_schema_hash_collect_returns_signal():
     c = ToolSchemaHashCollector([{"name": "read_file"}])
     s = _collect(c, ["ok"])
     assert s.name == "tool_schema_hash"
-    assert s.value >= 0.0
+    assert s.value == 0.0  # value is now a placeholder; verify uses `digest`
     assert s.distribution is not None
+
+
+def test_schema_hash_publishes_digest():
+    """tool_schema_hash must publish the full hex SHA-256 in `digest` so
+    verify can do exact-match comparison instead of numeric tolerance.
+    Was a real-bug fix: review found numeric value could false-pass on
+    tool schema changes that landed within tolerance × 1e9."""
+    c = ToolSchemaHashCollector([{"name": "read_file"}])
+    s = _collect(c, ["ok"])
+    assert s.digest is not None
+    assert len(s.digest) == 64  # SHA-256 hex
+    assert s.digest == c.schema_hash_str
+
+
+def test_schema_hash_digest_differs_per_schema():
+    s1 = _collect(ToolSchemaHashCollector([{"name": "a"}]), ["ok"])
+    s2 = _collect(ToolSchemaHashCollector([{"name": "b"}]), ["ok"])
+    assert s1.digest != s2.digest
 
 
 def test_schema_hash_empty_tools():
@@ -181,8 +238,15 @@ def test_anchor_drift_needs_extras():
 
 # --- embedding happy-path via mocked sentence_transformers ---
 
+try:
+    import numpy as np  # type: ignore[import-not-found]
+    _HAS_NUMPY = True
+except ImportError:
+    np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+
 def _make_st_mock():
-    import numpy as np
     mock_st = MagicMock()
     mock_model = MagicMock()
     n = 3
@@ -195,8 +259,8 @@ def _make_st_mock():
     return mock_st
 
 
+@pytest.mark.skipif(not _HAS_NUMPY, reason="numpy not installed (deep extra)")
 def test_embedding_profile_happy_path(monkeypatch):
-    import numpy as np
     mock_st = _make_st_mock()
     monkeypatch.setitem(sys.modules, "sentence_transformers", mock_st)
     monkeypatch.setitem(sys.modules, "numpy", np)
@@ -206,6 +270,7 @@ def test_embedding_profile_happy_path(monkeypatch):
     assert s.value >= 0.0
 
 
+@pytest.mark.skipif(not _HAS_NUMPY, reason="numpy not installed (deep extra)")
 def test_anchor_drift_happy_path(monkeypatch):
     mock_st = _make_st_mock()
     monkeypatch.setitem(sys.modules, "sentence_transformers", mock_st)

@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any, Dict, List
 
-from bedrock_attest.types import Signal
+from indelible.types import Signal
 
 
 class ToolSchemaHashCollector:
@@ -28,9 +28,12 @@ class ToolSchemaHashCollector:
         anchor_text: str,
         tools_called: List[List[str]],
     ) -> Signal:
-        numeric = float(int(self._hash[:8], 16)) % 1e9
+        # value/tolerance kept for backward-compat plotting; verify uses
+        # `digest` (exact hex match) — any tool-schema delta is a breach.
         return Signal(
             name=self.name,
-            value=numeric,
-            distribution={"hash_prefix": float(int(self._hash[:8], 16)), "tool_count": float(self._tool_count)},
+            value=0.0,
+            tolerance=0.0,
+            distribution={"tool_count": float(self._tool_count)},
+            digest=self._hash,
         )

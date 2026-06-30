@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import List, Protocol, runtime_checkable
 
-from bedrock_attest.types import Signal
+from indelible.types import Signal
 
 
 @runtime_checkable

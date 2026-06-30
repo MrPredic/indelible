@@ -11,14 +11,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from bedrock_attest.attest import attest
-from bedrock_attest.config import BedrockConfig
-from bedrock_attest.verify import verify
+from indelible.attest import attest
+from indelible.config import IndelibleConfig
+from indelible.verify import verify
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-FP_PATH = Path("bedrock.fingerprint.json")
+FP_PATH = Path("indelible.fingerprint.json")
 
-config = BedrockConfig(
+config = IndelibleConfig(
     agent_name="quickstart-agent",
     system_prompt="You are a concise assistant. Answer in one sentence.",
     tools=[],

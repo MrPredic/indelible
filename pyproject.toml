@@ -1,5 +1,5 @@
 [project]
-name = "bedrock-attest"
+name = "indelible"
 version = "0.1.0"
 description = "Behavioral attestation for AI agents — signed, verifiable, cross-provider."
 readme = "README.md"
@@ -29,7 +29,6 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "tiktoken>=0.7",
     "cryptography>=42",
     'tomli>=2 ; python_version < "3.11"',
     "tomli-w>=1.0",
@@ -37,9 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Adds embedding_profile + anchor_drift signals (cosine-based behavioral drift).
+# Pulls sentence-transformers + numpy (~150 MB). Skip for CI-only / fast paths.
 deep = ["sentence-transformers>=2.5", "numpy>=1.24"]
-drift = ["drift-detector-agent>=2.0"]
-cosign = ["sigstore>=3.0"]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",
@@ -51,26 +50,24 @@ dev = [
 all = [
     "sentence-transformers>=2.5",
     "numpy>=1.24",
-    "drift-detector-agent>=2.0",
-    "sigstore>=3.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/MrPredic/bedrock-attest"
-Repository = "https://github.com/MrPredic/bedrock-attest"
-Issues = "https://github.com/MrPredic/bedrock-attest/issues"
-Changelog = "https://github.com/MrPredic/bedrock-attest/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/MrPredic/bedrock-attest#readme"
+Homepage = "https://github.com/MrPredic/indelible"
+Repository = "https://github.com/MrPredic/indelible"
+Issues = "https://github.com/MrPredic/indelible/issues"
+Changelog = "https://github.com/MrPredic/indelible/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/MrPredic/indelible#readme"
 
 [project.scripts]
-bedrock = "bedrock_attest.cli:main"
+indelible = "indelible.cli:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["bedrock_attest*"]
+include = ["indelible*"]
 exclude = ["tests*", "examples*", "docs*"]
 
 [tool.ruff]
@@ -89,7 +86,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-omit = ["bedrock_attest/cli.py"]
+omit = ["indelible/cli.py"]
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]

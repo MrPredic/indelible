@@ -7,6 +7,8 @@ from typing import List, Optional, Tuple
 
 import httpx
 
+from indelible.providers.errors import raise_for_status
+
 
 class AnthropicProvider:
     API_URL = "https://api.anthropic.com/v1/messages"
@@ -38,15 +40,14 @@ class AnthropicProvider:
         resp = httpx.post(self.API_URL, json=body, headers=headers, timeout=60)
         latency = time.perf_counter() - t0
 
-        if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        raise_for_status(resp.status_code, resp.text)
 
         data = resp.json()
         blocks = data.get("content", [])
 
-        # extract text from the first text block (not necessarily index 0)
-        text_blocks = [b["text"] for b in blocks if b.get("type") == "text"]
-        content = text_blocks[0] if text_blocks else ""
+        # Concatenate all text blocks — Anthropic responses can interleave
+        # text/tool_use/text (e.g., commentary → tool call → final answer).
+        content = "".join(b["text"] for b in blocks if b.get("type") == "text")
 
         tools_called = [b["name"] for b in blocks if b.get("type") == "tool_use"]
 

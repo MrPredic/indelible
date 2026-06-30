@@ -1,17 +1,16 @@
-"""Tests for bedrock_attest.cli."""
+"""Tests for indelible.cli."""
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-import bedrock_attest.cli as cli_mod
-from bedrock_attest.config import BedrockConfig
-from bedrock_attest.types import Fingerprint, Signal, VerifyReport
+import indelible.cli as cli_mod
+from indelible.config import IndelibleConfig
+from indelible.types import Fingerprint, Signal
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -33,8 +32,8 @@ def _make_fp(*extra_signals: Signal) -> Fingerprint:
     )
 
 
-def _make_cfg() -> BedrockConfig:
-    return BedrockConfig(
+def _make_cfg() -> IndelibleConfig:
+    return IndelibleConfig(
         agent_name="test",
         system_prompt="You are helpful.",
         tools=[],
@@ -46,11 +45,10 @@ def _make_cfg() -> BedrockConfig:
 @pytest.fixture
 def iso(tmp_path, monkeypatch):
     """Redirect all CLI path constants to tmp_path."""
-    monkeypatch.setattr(cli_mod, "BEDROCK_DIR",  tmp_path)
+    monkeypatch.setattr(cli_mod, "INDELIBLE_DIR",  tmp_path)
     monkeypatch.setattr(cli_mod, "KEY_PATH",     tmp_path / "key.pem")
-    monkeypatch.setattr(cli_mod, "PUB_PATH",     tmp_path / "key.pub")
-    monkeypatch.setattr(cli_mod, "FP_FILE",      tmp_path / "bedrock.fingerprint.json")
-    monkeypatch.setattr(cli_mod, "TOML_FILE",    tmp_path / "bedrock.toml")
+    monkeypatch.setattr(cli_mod, "FP_FILE",      tmp_path / "indelible.fingerprint.json")
+    monkeypatch.setattr(cli_mod, "TOML_FILE",    tmp_path / "indelible.toml")
     monkeypatch.setattr(cli_mod, "PROMPTS_FILE", tmp_path / "prompts.json")
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -61,14 +59,13 @@ def iso(tmp_path, monkeypatch):
 def test_init_creates_key_and_files(iso):
     assert cli_mod.cmd_init() == 0
     assert (iso / "key.pem").exists()
-    assert (iso / "key.pub").exists()
-    assert (iso / "bedrock.toml").exists()
+    assert (iso / "indelible.toml").exists()
     assert (iso / "prompts.json").exists()
 
 
 def test_init_toml_is_valid(iso):
     cli_mod.cmd_init()
-    cfg = BedrockConfig.from_toml(iso / "bedrock.toml")
+    cfg = IndelibleConfig.from_toml(iso / "indelible.toml")
     assert cfg.agent_name  # non-empty
     assert cfg.model
 
@@ -119,18 +116,18 @@ def test_diff_missing_file_returns_3(iso):
 
 def test_attest_writes_fingerprint(iso):
     cfg = _make_cfg()
-    cfg.to_toml(iso / "bedrock.toml")
+    cfg.to_toml(iso / "indelible.toml")
     (iso / "prompts.json").write_text(json.dumps(["hi", "hello"]), encoding="utf-8")
 
     class Stub:
         def complete(self, system, user, tools=None): return ("stub", [], 0.05)
 
-    with patch("bedrock_attest.attest.get_provider", return_value=Stub()):
+    with patch("indelible.attest.get_provider", return_value=Stub()):
         code = cli_mod.cmd_attest()
 
     assert code == 0
-    assert (iso / "bedrock.fingerprint.json").exists()
-    data = json.loads((iso / "bedrock.fingerprint.json").read_text())
+    assert (iso / "indelible.fingerprint.json").exists()
+    data = json.loads((iso / "indelible.fingerprint.json").read_text())
     assert "signals" in data
 
 
@@ -138,41 +135,82 @@ def test_attest_missing_toml_returns_3(iso):
     assert cli_mod.cmd_attest() == 3
 
 
+def test_attest_with_custom_config_and_out(iso):
+    """P1-5: --config / --out lets a single repo host multiple agents."""
+    cfg = _make_cfg()
+    custom_toml = iso / "agents" / "coding.toml"
+    custom_toml.parent.mkdir(parents=True, exist_ok=True)
+    cfg.to_toml(custom_toml)
+    custom_prompts = iso / "agents" / "coding.prompts.json"
+    custom_prompts.write_text(json.dumps(["hi"]), encoding="utf-8")
+    custom_out = iso / "fingerprints" / "coding.json"
+
+    class Stub:
+        def complete(self, system, user, tools=None): return ("stub", [], 0.05)
+
+    with patch("indelible.attest.get_provider", return_value=Stub()):
+        code = cli_mod.cmd_attest(
+            config_path=custom_toml, out_path=custom_out, prompts_path=custom_prompts,
+        )
+
+    assert code == 0
+    assert custom_out.exists()
+    # The default fingerprint must NOT have been written
+    assert not (iso / "indelible.fingerprint.json").exists()
+
+
 # ── cmd_verify ─────────────────────────────────────────────────────────────────
 
 def test_verify_pass_report(iso):
     cfg = _make_cfg()
-    cfg.to_toml(iso / "bedrock.toml")
+    cfg.to_toml(iso / "indelible.toml")
     inputs = ["hi", "hello"]
     (iso / "prompts.json").write_text(json.dumps(inputs), encoding="utf-8")
     fp = _make_fp()
-    (iso / "bedrock.fingerprint.json").write_text(json.dumps(fp.to_dict()), encoding="utf-8")
+    (iso / "indelible.fingerprint.json").write_text(json.dumps(fp.to_dict()), encoding="utf-8")
 
-    mock_report = VerifyReport(
-        overall="pass",
-        per_signal=(("refusal_rate", "pass", "Δ 0.0000"),),
-        elapsed_s=0.1,
-    )
-    with patch("bedrock_attest.verify.attest", return_value=fp):
+    with patch("indelible.verify.attest", return_value=fp):
         code = cli_mod.cmd_verify()
 
     assert code in (0, 1, 2)  # any valid exit code = no crash
+
+
+def test_cli_attest_then_verify_with_signature(iso):
+    """End-to-end CLI flow: init → attest (signs) → verify (checks signature)."""
+    cfg = _make_cfg()
+    cfg.to_toml(iso / "indelible.toml")
+    (iso / "prompts.json").write_text(json.dumps(["hi", "hello"]), encoding="utf-8")
+
+    class Stub:
+        def complete(self, system, user, tools=None): return ("stub-out", [], 0.05)
+
+    cli_mod.cmd_init()  # generates key.pem
+    with patch("indelible.attest.get_provider", return_value=Stub()):
+        assert cli_mod.cmd_attest() == 0
+    # _sign should have written .sig + companion .pub *next to the fingerprint*,
+    # not next to the key — sigs travel with the artefact (P0-2 review fix).
+    assert (iso / "indelible.fingerprint.json.sig").exists()
+    assert (iso / "indelible.fingerprint.json.sig.pub").exists()
+
+    with patch("indelible.attest.get_provider", return_value=Stub()):
+        code = cli_mod.cmd_verify()
+    assert code == 0  # signature valid + signals deterministic → pass
 
 
 # ── subprocess (main) ──────────────────────────────────────────────────────────
 
 def test_main_help_exit0():
     result = subprocess.run(
-        [sys.executable, "-m", "bedrock_attest.cli", "--help"],
+        [sys.executable, "-m", "indelible.cli", "--help"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0
-    assert "bedrock" in result.stdout.lower()
+    assert "indelible" in result.stdout.lower()
 
 
 def test_main_no_args_exit3():
     result = subprocess.run(
-        [sys.executable, "-m", "bedrock_attest.cli"],
+        [sys.executable, "-m", "indelible.cli"],
         capture_output=True, text=True,
     )
     assert result.returncode == 3
