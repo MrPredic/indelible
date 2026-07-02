@@ -27,6 +27,22 @@
 
 ## [0.1.0] — Pre-release (review-hardened)
 
+### Security & determinism (post-review hardening)
+- **BREAKING (pre-publish): real public-key pinning.** `verify` now checks the
+  signature against a **pinned** `indelible.pub` (committed trust anchor) or a
+  `--pubkey` supplied out-of-band — no longer against a companion `.pub` written
+  next to the signature. The old self-attaching pub provided **zero** tamper
+  evidence: an attacker could edit the fingerprint, re-sign with their own key,
+  and ship their own pub. `_sign()` no longer writes any companion pub; `init`
+  now emits `indelible.pub` (and re-derives it for pre-existing keys). `verify`
+  with a signature but no pinned key is a hard error, not a silent pass.
+- **`temperature` config field, default `0.0`.** Attestation now runs the model
+  deterministically by default (threaded through all providers:
+  Anthropic/OpenAI-compat `temperature`, Ollama `options.temperature`), so
+  sampling noise no longer inflates every signal into false breaches.
+  `temperature` is part of the canonical config hash (a different temperature =
+  a different behavioral baseline).
+
 > **Renamed before first publish:** this project was developed under the working
 > name `bedrock-attest`. It was renamed to **`indelible`** prior to release to
 > avoid collision with Amazon Bedrock (which owns the `bedrock-*` namespace on
@@ -59,7 +75,7 @@ been addressed at the P0/P1 level.
 
 ### Fixed
 - **`tool_schema_hash` collision risk** — was numerically reducing SHA-256 to 8 hex digits, allowing tool-schema changes within tolerance × 1e9 to false-pass. Now uses `Signal.digest` exact match.
-- **Signature artefact location** — `.sig` + companion `.sig.pub` now travel with the fingerprint (`indelible.fingerprint.json.sig`), not next to the private key. Survives `git pull` into CI. Backward-compat fallback for legacy paths.
+- **Signature artefact location** — `.sig` travels with the fingerprint (`indelible.fingerprint.json.sig`), not next to the private key. Survives `git pull` into CI. Backward-compat fallback for legacy paths. (The public key is now the separately pinned `indelible.pub`; see the Security section above.)
 - **Hard-coded `maintainer=""`** — was always emitting empty maintainer despite the field being part of the signed payload.
 - **Anthropic multi-text block** — was only extracting the first text block; now concatenates all text blocks (Anthropic responses can interleave text/tool_use/text).
 - **Signal int vs float byte stability** — `Signal(value=5)` and `Signal(value=5.0)` produced different signing JSON; now coerced via `__post_init__`.

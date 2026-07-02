@@ -14,9 +14,10 @@ class AnthropicProvider:
     API_URL = "https://api.anthropic.com/v1/messages"
     API_VERSION = "2023-06-01"
 
-    def __init__(self, model: str, api_key: str) -> None:
+    def __init__(self, model: str, api_key: str, temperature: float = 0.0) -> None:
         self.model = model
         self.api_key = api_key
+        self.temperature = float(temperature)
 
     def complete(
         self, system: str, user: str, tools: Optional[list] = None
@@ -24,6 +25,7 @@ class AnthropicProvider:
         body: dict = {
             "model": self.model,
             "max_tokens": 1024,
+            "temperature": self.temperature,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         }

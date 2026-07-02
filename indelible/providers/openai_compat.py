@@ -11,10 +11,14 @@ from indelible.providers.errors import raise_for_status
 
 
 class OpenAICompatProvider:
-    def __init__(self, base_url: str, model: str, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self, base_url: str, model: str, api_key: Optional[str] = None,
+        temperature: float = 0.0,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        self.temperature = float(temperature)
 
     def complete(
         self, system: str, user: str, tools: Optional[list] = None
@@ -23,7 +27,7 @@ class OpenAICompatProvider:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        body: dict = {"model": self.model, "messages": messages}
+        body: dict = {"model": self.model, "messages": messages, "temperature": self.temperature}
         if tools:
             body["tools"] = copy.deepcopy(tools)
 

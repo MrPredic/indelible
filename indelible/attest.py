@@ -86,7 +86,10 @@ def attest(
     if not test_inputs:
         raise ValueError("test_inputs must be non-empty")
 
-    provider = get_provider(model, config.provider_url, _api_key(model, config.provider_url))
+    provider = get_provider(
+        model, config.provider_url, _api_key(model, config.provider_url),
+        temperature=getattr(config, "temperature", 0.0),
+    )
 
     outputs: List[str] = []
     tools_called: List[List[str]] = []
@@ -165,9 +168,7 @@ def _run_collectors(
 
 def _sign(fp: Fingerprint, key_path: str, *, sig_out_path: Optional[str] = None) -> None:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import (
-        load_pem_private_key, Encoding, PublicFormat,
-    )
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
     payload = fp.canonical_bytes()
     with open(key_path, "rb") as fh:
@@ -180,9 +181,9 @@ def _sign(fp: Fingerprint, key_path: str, *, sig_out_path: Optional[str] = None)
     with open(sig_path, "wb") as fh:
         fh.write(signature)
 
-    # Companion pub key sits next to the .sig (so verify() finds it via sig_path + ".pub")
-    pub_path = sig_path + ".pub"
-    with open(pub_path, "wb") as fh:
-        fh.write(private_key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo))
-
+    # NOTE: we deliberately do NOT write a companion public key next to the
+    # signature. A pub that travels with the sig is no trust anchor — an
+    # attacker edits the fingerprint, re-signs with their own key, and ships
+    # their own pub. Authenticity requires a *pinned* public key the verifier
+    # already trusts (committed `indelible.pub` or passed via --pubkey).
     logger.info("Signature written to %s", sig_path)

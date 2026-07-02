@@ -10,9 +10,12 @@ from indelible.providers.errors import raise_for_status
 
 
 class OllamaProvider:
-    def __init__(self, model: str, host: str = "http://localhost:11434") -> None:
+    def __init__(
+        self, model: str, host: str = "http://localhost:11434", temperature: float = 0.0,
+    ) -> None:
         self.model = model.removeprefix("ollama/")
         self.host = host.rstrip("/")
+        self.temperature = float(temperature)
 
     def complete(
         self, system: str, user: str, tools: Optional[list] = None
@@ -21,7 +24,10 @@ class OllamaProvider:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        body = {"model": self.model, "messages": messages, "stream": False}
+        body = {
+            "model": self.model, "messages": messages, "stream": False,
+            "options": {"temperature": self.temperature},
+        }
 
         t0 = time.perf_counter()
         resp = httpx.post(f"{self.host}/api/chat", json=body, timeout=120)

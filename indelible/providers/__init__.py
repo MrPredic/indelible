@@ -30,13 +30,18 @@ class Provider(Protocol):
         ...
 
 
-def get_provider(model: str, provider_url: str, api_key: Optional[str] = None) -> Provider:
+def get_provider(
+    model: str, provider_url: str, api_key: Optional[str] = None,
+    temperature: float = 0.0,
+) -> Provider:
     """Return the correct adapter based on model string prefix."""
     if model.startswith("claude-") or model.startswith("anthropic/"):
         if not api_key:
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        return AnthropicProvider(model=model, api_key=api_key)
+        return AnthropicProvider(model=model, api_key=api_key, temperature=temperature)
     if model.startswith("ollama/"):
         host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-        return OllamaProvider(model=model, host=host)
-    return OpenAICompatProvider(base_url=provider_url, model=model, api_key=api_key)
+        return OllamaProvider(model=model, host=host, temperature=temperature)
+    return OpenAICompatProvider(
+        base_url=provider_url, model=model, api_key=api_key, temperature=temperature,
+    )

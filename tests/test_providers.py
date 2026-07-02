@@ -129,6 +129,42 @@ def test_raise_for_status_unknown_status_raises_base():
     assert not isinstance(ei.value, (ProviderAuthError, ProviderRateLimitError, ProviderServerError))
 
 
+# --- temperature / determinism ---
+
+def test_openai_sends_temperature():
+    """OpenAI-compat body must carry the configured temperature (default 0.0)."""
+    resp = _mock_resp(200, {"choices": [{"message": {"content": "ok"}}]})
+    with patch("indelible.providers.openai_compat.httpx.post", return_value=resp) as mp:
+        OpenAICompatProvider("https://api.example.com", "gpt-4o", temperature=0.0).complete("s", "u")
+    assert mp.call_args.kwargs["json"]["temperature"] == 0.0
+
+
+def test_anthropic_sends_temperature():
+    resp = _mock_resp(200, {"content": [{"type": "text", "text": "ok"}]})
+    with patch("indelible.providers.anthropic.httpx.post", return_value=resp) as mp:
+        AnthropicProvider("claude-opus-4-7", "key", temperature=0.0).complete("s", "u")
+    assert mp.call_args.kwargs["json"]["temperature"] == 0.0
+
+
+def test_ollama_sends_temperature_in_options():
+    resp = _mock_resp(200, {"message": {"content": "ok"}})
+    with patch("indelible.providers.ollama.httpx.post", return_value=resp) as mp:
+        OllamaProvider("ollama/llama3.3", temperature=0.0).complete("s", "u")
+    assert mp.call_args.kwargs["json"]["options"]["temperature"] == 0.0
+
+
+def test_get_provider_passes_temperature():
+    p = get_provider("gpt-4o", "https://api.example.com", "key", temperature=0.3)
+    assert p.temperature == 0.3
+
+
+def test_provider_temperature_defaults_zero():
+    """Constructed without an explicit temperature → 0.0 (deterministic)."""
+    assert OpenAICompatProvider("https://api.example.com", "gpt-4o").temperature == 0.0
+    assert AnthropicProvider("claude-opus-4-7", "key").temperature == 0.0
+    assert OllamaProvider("ollama/m").temperature == 0.0
+
+
 # --- AnthropicProvider ---
 
 def test_anthropic_basic():

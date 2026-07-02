@@ -11,16 +11,18 @@
 
 Model providers silently update their models. Your agent works today, but after a silent RLHF adjustment it might refuse more requests, use tools differently, or produce subtly worse outputs. You won't notice — until indelible catches it.
 
-The output is a single signed JSON file (`indelible.fingerprint.json`) — diffable, offline-verifiable, and re-runnable across providers (Anthropic, OpenAI, Ollama, Groq). EU AI Act audit requirements (Q3 2026) ask for "documented baselines" for High-Risk AI systems; a fingerprint is exactly that artefact.
+The output is a single signed JSON file (`indelible.fingerprint.json`) — diffable, offline-verifiable against a pinned key, and re-runnable across providers (Anthropic, OpenAI, Ollama, Groq). It can also serve as one supporting artefact in an EU AI Act High-Risk record-keeping file — a dated, signed behavioral baseline (not a certified deliverable on its own).
 
 ## Quickstart
 
 ```bash
 pip install indelible
-indelible init          # generate signing key + scaffold indelible.toml + prompts.json
-indelible attest        # run test suite, save indelible.fingerprint.json
-indelible verify        # re-run + compare → PASS / WARN / BREACH
+indelible init          # generate signing key + pinned indelible.pub + scaffold indelible.toml + prompts.json
+indelible attest        # run test suite (temperature=0), save + sign indelible.fingerprint.json
+indelible verify        # re-run + compare, check signature vs pinned indelible.pub → PASS / WARN / BREACH
 ```
+
+> **Commit `indelible.pub`.** It's the trust anchor `verify` checks the signature against. The private key stays in `~/.indelible/key.pem` and never enters the repo.
 
 ## Python API
 
@@ -103,7 +105,7 @@ These are complements, not competitors. Use Promptfoo for quality, Phoenix for l
 
 ✓ After model upgrades — verify behavior hasn't regressed  
 ✓ CI gate — fail the build if behavioral contract is breached  
-✓ EU AI Act compliance — fingerprints are "documented baselines"  
+✓ EU AI Act evidence — a signed, dated baseline to attach to a High-Risk record-keeping file  
 ✓ Multi-provider comparison — same prompts, different models, signed diff  
 
 ## When NOT to use
@@ -150,8 +152,10 @@ If you are building in this space, please open an issue — there is more value 
 ## Limitations
 
 - Statistical signals catch *distributional* drift, not task-correctness regressions. Pair with Promptfoo/DeepEval for quality-side coverage.
-- Behavioral signals have a small non-zero noise floor: identical setups may show deltas under the default tolerance band.
+- Baselines run at `temperature=0` to minimise sampling noise, but a small non-zero noise floor remains (MoE routing / batch effects): identical setups may show deltas under the default tolerance band. Default tolerances are hand-tuned, not yet empirically calibrated against a corpus of real model-update events — treat WARN/BREACH bands as starting points to tune per agent.
+- **Signature = tamper-evidence relative to a pinned key.** verify checks the `.sig` against `indelible.pub`; an attacker editing the fingerprint must re-sign with the pinned private key (which they don't have), and re-signing with a *different* key is detected because it won't match the pinned pub. The guarantee is only as strong as your control of `indelible.pub` — a consumer verifying a third party's fingerprint should pin that party's key out-of-band (`--pubkey`), not read it from the same repo. The signature authenticates origin + integrity, **not** the honesty of the attester.
 - v0.1 ships only Ed25519 with manual key management. OIDC / keyless (Cosign-style) is on the v0.2 roadmap, not a current feature.
+- Latency is included as a signal but reflects network + provider load as much as the model; treat its verdict as informational and widen its tolerance for noisy providers.
 - Ollama is recommended for fast iteration (no API costs during development).
 
 ## License

@@ -33,9 +33,10 @@ The output is a single JSON file: diffable, signable, auditable.
 ## CLI
 
 ```
-indelible init                       # scaffold key + indelible.toml + prompts.json
-indelible attest                     # produces indelible.fingerprint.json + .sig + .sig.pub
-indelible verify                     # exit 0=pass 1=warn 2=breach 3=error
+indelible init                       # scaffold private key + pinned indelible.pub + indelible.toml + prompts.json
+indelible attest                     # produces indelible.fingerprint.json + .sig
+indelible verify                     # verifies .sig against pinned indelible.pub; exit 0=pass 1=warn 2=breach 3=error
+indelible verify --pubkey vendor.pub # pin a public key obtained out-of-band (vendor→consumer trust)
 indelible diff a.json b.json         # diff two fingerprints offline (no API calls)
 
 # Multi-agent repos: attest each agent into its own fingerprint
@@ -60,7 +61,8 @@ with open("indelible.fingerprint.json", "w") as f:
     json.dump(fp.to_dict(), f, indent=2)
 
 report = verify("indelible.fingerprint.json", config, "claude-opus-4-7",
-                test_inputs=[...], sig_path="indelible.fingerprint.json.sig")
+                test_inputs=[...], sig_path="indelible.fingerprint.json.sig",
+                pubkey_path="indelible.pub")  # pinned trust anchor; required with sig_path
 if report.breached:
     raise RuntimeError(report.summary())
 ```
@@ -108,12 +110,11 @@ description = "Search the web"
 
 ## How attest + verify work end-to-end
 
-1. `indelible init` generates an Ed25519 key at `~/.indelible/key.pem` and scaffolds `indelible.toml` + `prompts.json`.
-2. `indelible attest` reads the config, runs each prompt against the model, runs 7 collectors over the responses, builds a `Fingerprint` dataclass, signs `Fingerprint.canonical_bytes()` (sorted-keys JSON), writes:
+1. `indelible init` generates an Ed25519 private key at `~/.indelible/key.pem` and writes the matching public key to `indelible.pub` in the repo. **`indelible.pub` is the pinned trust anchor — commit it.** Also scaffolds `indelible.toml` + `prompts.json`.
+2. `indelible attest` reads the config, runs each prompt against the model at `temperature=0` (deterministic baseline), runs 7 collectors over the responses, builds a `Fingerprint` dataclass, signs `Fingerprint.canonical_bytes()` (sorted-keys JSON), writes:
    - `indelible.fingerprint.json` — the fingerprint
-   - `indelible.fingerprint.json.sig` — Ed25519 signature
-   - `indelible.fingerprint.json.sig.pub` — companion public key (so verify is self-contained)
-3. `indelible verify` loads the fingerprint, validates the signature against the companion `.pub`, then re-runs attest on the current model and compares signal by signal. Context guards short-circuit early on `config_hash` or `test_set_hash` mismatch — saves the API budget for runs whose verdict is already breach.
+   - `indelible.fingerprint.json.sig` — Ed25519 signature (no companion public key is written — see below)
+3. `indelible verify` loads the fingerprint, validates the signature **against the pinned `indelible.pub`** (or a `--pubkey` you supply out-of-band), then re-runs attest on the current model and compares signal by signal. Context guards short-circuit early on `config_hash` or `test_set_hash` mismatch — saves the API budget for runs whose verdict is already breach.
 
 ## When to use indelible
 
@@ -143,7 +144,10 @@ All four. Provider is auto-detected from the model string:
 API keys are read from environment: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`. Ollama needs no key.
 
 ### What's the EU AI Act angle?
-EU AI Act (Q3 2026) requires "documented baselines" for High-Risk AI systems. A signed `indelible.fingerprint.json` is exactly that artefact: a tamper-evident statement of "the agent behaved like *this* on *this* test set on *this* date." The maintainer field carries the attesting party.
+The EU AI Act's High-Risk regime calls for documentation, record-keeping, and post-market monitoring. An `indelible.fingerprint.json` can serve as *one* supporting artefact — a dated, signed statement of "the agent behaved like *this* on *this* test set." It is **not** a certified compliance deliverable on its own; treat it as evidence to attach to a broader risk-management file, not as a substitute for it.
+
+### What does the signature actually protect against?
+Tamper-evidence **relative to a pinned public key**. verify checks the `.sig` against `indelible.pub` (committed / pinned out-of-band), so anyone who edits the fingerprint must re-sign with the pinned private key — which they don't have. Editing *and* re-signing with a different key is detected, because the pinned `indelible.pub` no longer matches. The guarantee is only as strong as your control of the pinned key: rotating `indelible.pub` is a visible git diff, and a consumer verifying a vendor's fingerprint should obtain the vendor's public key out-of-band (`--pubkey`), not from the same repo. Note: the signature does **not** protect against the *attester themselves* producing a misleading baseline — it authenticates origin + integrity, not honesty.
 
 ### How is this different from Sigstore / sigstore-a2a?
 Sigstore signs *code/identity*. The official `sigstore/sigstore-a2a` project (Linux Foundation, 2025–) signs A2A AgentCards — agent *identity*. indelible signs agent *behavior*: the actual statistical fingerprint produced by running the agent against a test suite. Conceptually closer to **in-toto** (attestations *about* artefact properties) than to Sigstore (signing the artefact itself).
@@ -165,8 +169,8 @@ Because it's a SHA-256, not a measurement. Comparing two SHA-256 hashes via nume
 ### How big is the fingerprint?
 Typical: ~1–2 KB JSON for 7 signals. Signature: 64 bytes. Public key: ~110 bytes PEM. Tiny enough to commit to the repo.
 
-### Is the public key embedded in the fingerprint?
-No, it's a companion file (`<fp>.sig.pub`). v0.1 design: explicit and inspectable. v0.2 plans an in-toto envelope where the cert chain travels with the artefact (cosign-style).
+### Where does the public key live?
+In a pinned file `indelible.pub`, committed to the repo (or supplied via `--pubkey`). It is deliberately **not** written next to the signature: a public key that travels with the signature is no trust anchor, since an attacker could re-sign a tampered fingerprint and ship their own key. v0.2 plans an in-toto / cosign-style envelope with keyless (OIDC) signing.
 
 ## Quickstart with Anthropic (no Ollama needed)
 

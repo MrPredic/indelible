@@ -143,6 +143,21 @@ def test_api_key_falls_back_when_specific_unset(monkeypatch):
     assert _api_key("llama-3", provider_url="https://api.groq.com/v1") == "openai-key"
 
 
+def test_attest_passes_config_temperature_to_provider(cfg, inputs):
+    """attest must thread config.temperature into get_provider so the
+    deterministic-baseline setting actually reaches the API call."""
+    cfg.temperature = 0.0
+    captured = {}
+
+    def fake_get_provider(model, url, key, temperature=None):
+        captured["temperature"] = temperature
+        return StubProvider()
+
+    with patch("indelible.attest.get_provider", side_effect=fake_get_provider):
+        attest(cfg, inputs, "gpt-4o")
+    assert captured["temperature"] == 0.0
+
+
 def test_attest_does_not_mutate_inputs(cfg):
     original = ["prompt A", "prompt B"]
     copy_ = list(original)
@@ -151,7 +166,18 @@ def test_attest_does_not_mutate_inputs(cfg):
     assert original == copy_
 
 
-def test_attest_sign_writes_sig_and_pub(cfg, inputs, tmp_path):
+def _pin_pub(key: Ed25519PrivateKey, path: Path) -> Path:
+    """Write the public key as a pinned trust anchor (as `init` does)."""
+    path.write_bytes(
+        key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    )
+    return path
+
+
+def test_attest_sign_writes_sig_no_companion_pub(cfg, inputs, tmp_path):
+    """The .sig must NOT carry a companion .pub beside it — that was the
+    tamper vuln (attacker re-signs and ships their own pub). The public key
+    is pinned separately at init time as the trust anchor."""
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "key.pem"
     key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
@@ -160,7 +186,7 @@ def test_attest_sign_writes_sig_and_pub(cfg, inputs, tmp_path):
         attest(cfg, inputs, "gpt-4o", sign_key=str(key_path))
 
     assert (tmp_path / "key.pem.sig").exists()
-    assert (tmp_path / "key.pem.sig.pub").exists()  # companion pub sits next to .sig
+    assert not (tmp_path / "key.pem.sig.pub").exists()  # NO self-attesting companion pub
 
 
 # --- verify() ---
@@ -237,8 +263,29 @@ def test_verify_missing_signal_is_warn(cfg, inputs, tmp_path):
     assert ghost_verdict == "warn"
 
 
-def test_sign_then_verify_roundtrip(cfg, inputs, tmp_path):
-    """End-to-end: attest with sign_key, then verify with the produced .sig — must pass."""
+def test_sign_then_verify_roundtrip_with_pinned_pubkey(cfg, inputs, tmp_path):
+    """End-to-end: attest with sign_key, verify with the .sig against the
+    pinned public key — must pass."""
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "key.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    pub_path = _pin_pub(key, tmp_path / "indelible.pub")
+
+    with patch("indelible.attest.get_provider", return_value=StubProvider()):
+        fp = attest(cfg, inputs, "gpt-4o", sign_key=str(key_path))
+    fpath = _save_fp(fp, tmp_path)
+
+    sig_path = str(key_path) + ".sig"
+    with patch("indelible.attest.get_provider", return_value=StubProvider()):
+        report = verify(str(fpath), cfg, "gpt-4o", inputs,
+                        sig_path=sig_path, pubkey_path=str(pub_path))
+
+    assert report.overall == "pass"
+
+
+def test_verify_signature_requires_pinned_pubkey(cfg, inputs, tmp_path):
+    """A .sig without a pinned public key gives no trust anchor — verify must
+    refuse (raise), never silently pass. This closes the self-signing hole."""
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "key.pem"
     key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
@@ -247,11 +294,57 @@ def test_sign_then_verify_roundtrip(cfg, inputs, tmp_path):
         fp = attest(cfg, inputs, "gpt-4o", sign_key=str(key_path))
     fpath = _save_fp(fp, tmp_path)
 
-    sig_path = str(key_path) + ".sig"
-    with patch("indelible.attest.get_provider", return_value=StubProvider()):
-        report = verify(str(fpath), cfg, "gpt-4o", inputs, sig_path=sig_path)
+    with pytest.raises(ValueError, match="[Pp]ublic key|pubkey|anchor"):
+        verify(str(fpath), cfg, "gpt-4o", inputs, sig_path=str(key_path) + ".sig")
 
-    assert report.overall == "pass"
+
+def test_verify_against_wrong_pinned_key_raises(cfg, inputs, tmp_path):
+    """Signed with key A, verified against a pinned key B → reject."""
+    key_a = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "key.pem"
+    key_path.write_bytes(key_a.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    wrong_pub = _pin_pub(Ed25519PrivateKey.generate(), tmp_path / "wrong.pub")
+
+    with patch("indelible.attest.get_provider", return_value=StubProvider()):
+        fp = attest(cfg, inputs, "gpt-4o", sign_key=str(key_path))
+    fpath = _save_fp(fp, tmp_path)
+
+    with patch("indelible.attest.get_provider", return_value=StubProvider()):
+        with pytest.raises(ValueError, match="[Ss]ignature"):
+            verify(str(fpath), cfg, "gpt-4o", inputs,
+                   sig_path=str(key_path) + ".sig", pubkey_path=str(wrong_pub))
+
+
+def test_tampered_fingerprint_resigned_with_attacker_key_fails_pinned_verify(cfg, inputs, tmp_path):
+    """Headline tamper-evidence guarantee: an attacker who edits the fingerprint
+    and re-signs it with their OWN key cannot pass verify against the pinned
+    (legitimate) public key. Pre-fix, the attacker just shipped their pub next
+    to the sig and verify trusted it — this is exactly that hole, closed."""
+    legit = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "key.pem"
+    key_path.write_bytes(legit.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    pinned_pub = _pin_pub(legit, tmp_path / "indelible.pub")
+
+    with patch("indelible.attest.get_provider", return_value=StubProvider()):
+        fp = attest(cfg, inputs, "gpt-4o", sign_key=str(key_path))
+
+    # Attacker rewrites the fingerprint on disk...
+    tampered = Fingerprint(
+        schema_version=fp.schema_version, config_hash=fp.config_hash,
+        model=fp.model, timestamp="2099-01-01T00:00:00Z",
+        maintainer="attacker@evil.com",
+        signals=fp.signals, test_set_hash=fp.test_set_hash,
+    )
+    fpath = _save_fp(tampered, tmp_path)
+    # ...and re-signs it with their own key, overwriting the .sig
+    attacker = Ed25519PrivateKey.generate()
+    sig_path = tmp_path / "key.pem.sig"
+    sig_path.write_bytes(attacker.sign(tampered.canonical_bytes()))
+
+    with patch("indelible.attest.get_provider", return_value=StubProvider()):
+        with pytest.raises(ValueError, match="[Ss]ignature"):
+            verify(str(fpath), cfg, "gpt-4o", inputs,
+                   sig_path=str(sig_path), pubkey_path=str(pinned_pub))
 
 
 def test_verify_breach_on_wrong_config(cfg, inputs, tmp_path):
@@ -370,11 +463,10 @@ def test_verify_invalid_sig_raises(cfg, inputs, tmp_path):
     fpath = _save_fp(fp, tmp_path)
     sig_path = tmp_path / "fake.sig"
     sig_path.write_bytes(b"not-a-real-signature")
-    # companion pub key lives at sig_path + ".pub" (new convention)
-    pub_path = Path(str(sig_path) + ".pub")
-    key = Ed25519PrivateKey.generate()
-    pub_path.write_bytes(key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo))
+    # A real pinned trust anchor; the garbage signature must fail against it.
+    pub_path = _pin_pub(Ed25519PrivateKey.generate(), tmp_path / "indelible.pub")
 
     with patch("indelible.attest.get_provider", return_value=StubProvider()):
         with pytest.raises(ValueError, match="[Ss]ignature"):
-            verify(str(fpath), cfg, "gpt-4o", inputs, sig_path=str(sig_path))
+            verify(str(fpath), cfg, "gpt-4o", inputs,
+                   sig_path=str(sig_path), pubkey_path=str(pub_path))

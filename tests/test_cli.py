@@ -47,6 +47,7 @@ def iso(tmp_path, monkeypatch):
     """Redirect all CLI path constants to tmp_path."""
     monkeypatch.setattr(cli_mod, "INDELIBLE_DIR",  tmp_path)
     monkeypatch.setattr(cli_mod, "KEY_PATH",     tmp_path / "key.pem")
+    monkeypatch.setattr(cli_mod, "PUB_FILE",     tmp_path / "indelible.pub")
     monkeypatch.setattr(cli_mod, "FP_FILE",      tmp_path / "indelible.fingerprint.json")
     monkeypatch.setattr(cli_mod, "TOML_FILE",    tmp_path / "indelible.toml")
     monkeypatch.setattr(cli_mod, "PROMPTS_FILE", tmp_path / "prompts.json")
@@ -81,6 +82,38 @@ def test_init_does_not_overwrite_existing_key(iso):
     (iso / "key.pem").write_bytes(b"ORIGINAL")
     cli_mod.cmd_init()
     assert (iso / "key.pem").read_bytes() == b"ORIGINAL"
+
+
+def test_init_writes_pinned_pubkey(iso):
+    """init must emit indelible.pub — the committed trust anchor verify pins to."""
+    cli_mod.cmd_init()
+    assert (iso / "indelible.pub").exists()
+
+
+def test_init_pubkey_matches_private_key(iso):
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, PublicFormat, load_pem_private_key, load_pem_public_key,
+    )
+    cli_mod.cmd_init()
+    priv = load_pem_private_key((iso / "key.pem").read_bytes(), password=None)
+    pinned = load_pem_public_key((iso / "indelible.pub").read_bytes())
+    fmt = dict(encoding=Encoding.PEM, format=PublicFormat.SubjectPublicKeyInfo)
+    assert priv.public_key().public_bytes(**fmt) == pinned.public_bytes(**fmt)
+
+
+def test_init_writes_pinned_pubkey_when_key_preexists(iso):
+    """If key.pem already exists but indelible.pub is missing (upgrade path),
+    init must still derive and pin the public key."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, NoEncryption, PrivateFormat,
+    )
+    key = Ed25519PrivateKey.generate()
+    (iso / "key.pem").write_bytes(
+        key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+    )
+    cli_mod.cmd_init()
+    assert (iso / "indelible.pub").exists()
 
 
 # ── cmd_diff ───────────────────────────────────────────────────────────────────
@@ -184,17 +217,37 @@ def test_cli_attest_then_verify_with_signature(iso):
     class Stub:
         def complete(self, system, user, tools=None): return ("stub-out", [], 0.05)
 
-    cli_mod.cmd_init()  # generates key.pem
+    cli_mod.cmd_init()  # generates key.pem + pinned indelible.pub
     with patch("indelible.attest.get_provider", return_value=Stub()):
         assert cli_mod.cmd_attest() == 0
-    # _sign should have written .sig + companion .pub *next to the fingerprint*,
-    # not next to the key — sigs travel with the artefact (P0-2 review fix).
+    # .sig travels next to the fingerprint (P0-2). NO companion .pub — the
+    # public key is the separately pinned indelible.pub trust anchor.
     assert (iso / "indelible.fingerprint.json.sig").exists()
-    assert (iso / "indelible.fingerprint.json.sig.pub").exists()
+    assert not (iso / "indelible.fingerprint.json.sig.pub").exists()
 
     with patch("indelible.attest.get_provider", return_value=Stub()):
         code = cli_mod.cmd_verify()
-    assert code == 0  # signature valid + signals deterministic → pass
+    assert code == 0  # signature valid against pinned pub + deterministic → pass
+
+
+def test_verify_errors_without_pinned_pubkey(iso):
+    """A signed fingerprint with no pinned indelible.pub → verify must error
+    (exit 3), not silently pass — there is no trust anchor to check against."""
+    cfg = _make_cfg()
+    cfg.to_toml(iso / "indelible.toml")
+    (iso / "prompts.json").write_text(json.dumps(["hi", "hello"]), encoding="utf-8")
+
+    class Stub:
+        def complete(self, system, user, tools=None): return ("stub-out", [], 0.05)
+
+    cli_mod.cmd_init()
+    with patch("indelible.attest.get_provider", return_value=Stub()):
+        assert cli_mod.cmd_attest() == 0
+    (iso / "indelible.pub").unlink()  # trust anchor gone
+
+    with patch("indelible.attest.get_provider", return_value=Stub()):
+        code = cli_mod.cmd_verify()
+    assert code == 3
 
 
 # ── subprocess (main) ──────────────────────────────────────────────────────────

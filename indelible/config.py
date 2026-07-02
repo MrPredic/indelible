@@ -42,6 +42,7 @@ class IndelibleConfig:
         tolerance_default: float = 0.05,
         maintainer: str = "",
         refusal_patterns: Optional[List[str]] = None,
+        temperature: float = 0.0,
     ) -> None:
         self.agent_name = agent_name
         self.system_prompt = system_prompt
@@ -50,6 +51,10 @@ class IndelibleConfig:
         self.provider_url = provider_url
         self.tolerance_default = tolerance_default
         self.maintainer = maintainer
+        # 0.0 = deterministic sampling. The whole tool compares run A to run B,
+        # so a non-zero default would inject sampling noise straight into every
+        # signal and manufacture false breaches.
+        self.temperature = float(temperature)
         # None = use collector defaults; explicit list = override
         self.refusal_patterns: Optional[List[str]] = (
             list(refusal_patterns) if refusal_patterns is not None else None
@@ -84,6 +89,7 @@ class IndelibleConfig:
             tolerance_default=agent.get("tolerance_default", 0.05),
             maintainer=agent.get("maintainer", ""),
             refusal_patterns=refusal_patterns,
+            temperature=agent.get("temperature", 0.0),
         )
 
     def to_toml(self, path: Union[str, Path]) -> None:
@@ -94,6 +100,7 @@ class IndelibleConfig:
             "model": self.model,
             "provider_url": self.provider_url,
             "tolerance_default": self.tolerance_default,
+            "temperature": self.temperature,
         }
         if self.maintainer:
             agent["maintainer"] = self.maintainer
@@ -119,6 +126,9 @@ class IndelibleConfig:
             "model": self.model,
             "provider_url": self.provider_url,
             "tolerance_default": self.tolerance_default,
+            # temperature IS canonical: it changes the sampling distribution,
+            # hence the attested vocab_entropy/refusal baseline.
+            "temperature": self.temperature,
         }
         if self.refusal_patterns is not None:
             d["refusal_patterns"] = list(self.refusal_patterns)
@@ -135,6 +145,7 @@ class IndelibleConfig:
             tolerance_default=d.get("tolerance_default", 0.05),
             maintainer=d.get("maintainer", ""),
             refusal_patterns=d.get("refusal_patterns"),
+            temperature=d.get("temperature", 0.0),
         )
 
     def canonical_hash(self) -> str:

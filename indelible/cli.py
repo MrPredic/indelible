@@ -9,7 +9,7 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
-    Encoding, NoEncryption, PrivateFormat,
+    Encoding, NoEncryption, PrivateFormat, PublicFormat,
 )
 
 GREEN  = "\033[92m"
@@ -22,6 +22,9 @@ KEY_PATH     = INDELIBLE_DIR / "key.pem"
 FP_FILE      = Path("indelible.fingerprint.json")
 TOML_FILE    = Path("indelible.toml")
 PROMPTS_FILE = Path("prompts.json")
+# Pinned public key = the trust anchor. Private key stays in ~/.indelible;
+# the pub is committed to the repo so changing it is a reviewable git diff.
+PUB_FILE     = Path("indelible.pub")
 
 _TOML_TEMPLATE = """\
 [agent]
@@ -30,6 +33,7 @@ system_prompt = "You are a helpful assistant."
 model = "claude-haiku-4-5"
 provider_url = "https://api.anthropic.com"
 tolerance_default = 0.05
+temperature = 0.0                # 0.0 = deterministic baseline; raise only to attest a deliberately sampled agent
 maintainer = "you@example.com"   # signed into every fingerprint — answers "who attested this?"
 """
 
@@ -60,10 +64,26 @@ def cmd_init() -> int:
 
         if KEY_PATH.exists():
             print(f"{YELLOW}Key already exists at {KEY_PATH} — skipping key generation.{RESET}")
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            loaded = load_pem_private_key(KEY_PATH.read_bytes(), password=None)
+            if not isinstance(loaded, Ed25519PrivateKey):
+                raise ValueError(f"{KEY_PATH} is not an Ed25519 private key")
+            priv = loaded
         else:
             priv = Ed25519PrivateKey.generate()
             KEY_PATH.write_bytes(priv.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
             print(f"{GREEN}✓{RESET} Key generated → {KEY_PATH}")
+
+        # Pin the public key as the committed trust anchor. Written (or
+        # re-derived) even when the private key pre-exists, so upgrades from a
+        # pre-pinning setup get an indelible.pub too.
+        if PUB_FILE.exists():
+            print(f"{YELLOW}{PUB_FILE} already exists — skipping.{RESET}")
+        else:
+            PUB_FILE.write_bytes(
+                priv.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+            )
+            print(f"{GREEN}✓{RESET} Public key pinned → {PUB_FILE} (commit this)")
 
         if TOML_FILE.exists():
             print(f"{YELLOW}indelible.toml already exists — skipping.{RESET}")
@@ -131,6 +151,7 @@ def cmd_verify(
     config_path: Optional[Path] = None,
     fp_path: Optional[Path] = None,
     prompts_path: Optional[Path] = None,
+    pubkey_path: Optional[Path] = None,
 ) -> int:
     from indelible.config import IndelibleConfig
     from indelible.verify import verify as _verify
@@ -154,10 +175,27 @@ def cmd_verify(
         else:
             sig_arg = None
 
+        # A signature is only meaningful against a pinned public key. Default
+        # to the committed indelible.pub; a signed fingerprint with no pinned
+        # key is a hard error, not a silent pass.
+        pub_arg: Optional[str] = None
+        if sig_arg:
+            pub_p = pubkey_path if pubkey_path else PUB_FILE
+            if not Path(pub_p).exists():
+                print(
+                    f"{RED}Error: signature present ({sig_arg}) but no pinned public key "
+                    f"at {pub_p}. Cannot verify authenticity — commit indelible.pub or "
+                    f"pass --pubkey.{RESET}",
+                    file=sys.stderr,
+                )
+                return 3
+            pub_arg = str(pub_p)
+
         print(f"Re-attesting {len(inputs)} inputs against {config.model} …")
         if sig_arg:
-            print(f"  (verifying signature at {sig_arg})")
-        report = _verify(str(fp_p), config, config.model, inputs, sig_path=sig_arg)
+            print(f"  (verifying signature at {sig_arg} against pinned key {pub_arg})")
+        report = _verify(str(fp_p), config, config.model, inputs,
+                         sig_path=sig_arg, pubkey_path=pub_arg)
 
         for name, verdict, detail in report.per_signal:
             print(f"  {_icon(verdict)} {name:<25} {detail}")
@@ -242,6 +280,9 @@ def main() -> None:
                           help="Path to fingerprint to verify (default: ./indelible.fingerprint.json)")
     verify_p.add_argument("--prompts", type=Path, default=None,
                           help="Path to prompts.json (default: ./prompts.json)")
+    verify_p.add_argument("--pubkey",  type=Path, default=None,
+                          help="Pinned Ed25519 public key to verify the signature against "
+                               "(default: ./indelible.pub)")
 
     diff_p = sub.add_parser("diff", help="Compare two fingerprint files without re-attesting")
     diff_p.add_argument("a", metavar="FINGERPRINT_A")
@@ -258,6 +299,7 @@ def main() -> None:
     elif args.cmd == "verify":
         sys.exit(cmd_verify(
             config_path=args.config, fp_path=args.fp, prompts_path=args.prompts,
+            pubkey_path=args.pubkey,
         ))
     elif args.cmd == "diff":
         sys.exit(cmd_diff(args.a, args.b))

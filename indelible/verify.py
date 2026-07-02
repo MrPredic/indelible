@@ -46,6 +46,7 @@ def verify(
     test_inputs: List[str],
     *,
     sig_path: Optional[str] = None,
+    pubkey_path: Optional[str] = None,
 ) -> VerifyReport:
     """Compare current agent behavior against a saved Fingerprint.
 
@@ -55,6 +56,11 @@ def verify(
         model: Model identifier to attest against.
         test_inputs: Same prompts used during original attestation.
         sig_path: Optional path to ``.sig`` file for signature verification.
+        pubkey_path: Path to the *pinned* Ed25519 public key (the trust
+            anchor). **Required whenever ``sig_path`` is given** — verifying a
+            signature without a pinned key proves nothing (the signer could be
+            anyone). Point this at your committed ``indelible.pub`` or a key you
+            obtained out-of-band from the attesting party.
 
     Returns:
         :class:`~indelible.types.VerifyReport` with per-signal verdicts.
@@ -65,7 +71,13 @@ def verify(
         original = Fingerprint.from_dict(json.load(fh))
 
     if sig_path:
-        _verify_signature(original, sig_path)
+        if not pubkey_path:
+            raise ValueError(
+                "pubkey_path is required to verify a signature: a signature "
+                "without a pinned public key is not a trust anchor. Pass the "
+                "committed indelible.pub (or a key obtained out-of-band)."
+            )
+        _verify_signature(original, sig_path, pubkey_path)
 
     # Context guards: a fingerprint is only meaningful for the same config + test set.
     # Mismatch is breach (not warn) — silently passing here would defeat attestation.
@@ -117,7 +129,7 @@ def verify(
     )
 
 
-def _verify_signature(fp: Fingerprint, sig_path: str) -> None:
+def _verify_signature(fp: Fingerprint, sig_path: str, pubkey_path: str) -> None:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -126,10 +138,12 @@ def _verify_signature(fp: Fingerprint, sig_path: str) -> None:
     with open(sig_path, "rb") as fh:
         signature = fh.read()
 
-    # Companion pub key written by _sign() lives at sig_path + ".pub"
-    pub_path = Path(sig_path + ".pub")
+    # Trust anchor: the *pinned* public key the caller already trusts, NOT a
+    # pub that rode along next to the sig. Changing this key is a visible,
+    # reviewable event (git diff of indelible.pub / an out-of-band re-pin).
+    pub_path = Path(pubkey_path)
     if not pub_path.exists():
-        raise ValueError(f"Public key not found at {pub_path}")
+        raise ValueError(f"Pinned public key not found at {pub_path}")
     with open(pub_path, "rb") as fh:
         public_key = load_pem_public_key(fh.read())
     if not isinstance(public_key, Ed25519PublicKey):

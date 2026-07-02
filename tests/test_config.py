@@ -148,6 +148,39 @@ def test_maintainer_roundtrip_toml(tmp_path):
     assert IndelibleConfig.from_toml(path).maintainer == "alice@example.com"
 
 
+# --- temperature wiring (determinism fix) ---
+
+def test_temperature_default_zero():
+    """Default temperature must be 0.0 — deterministic baseline minimises
+    run-to-run sampling noise that would otherwise cause false breaches."""
+    assert _make_config().temperature == 0.0
+
+
+def test_temperature_roundtrip_toml(tmp_path):
+    cfg = _make_config(temperature=0.7)
+    path = tmp_path / "indelible.toml"
+    cfg.to_toml(path)
+    assert IndelibleConfig.from_toml(path).temperature == 0.7
+
+
+def test_temperature_in_canonical_hash():
+    """Different sampling temperature = different behavioral baseline →
+    canonical_hash MUST differ (temp 0 vs temp 1 produce different
+    vocab_entropy/refusal distributions)."""
+    a = _make_config(temperature=0.0)
+    b = _make_config(temperature=1.0)
+    assert a.canonical_hash() != b.canonical_hash()
+
+
+def test_temperature_default_keeps_legacy_hash_stable():
+    """temperature=0.0 (the default) must hash identically whether set
+    explicitly or omitted — but note this DOES change the pre-temperature
+    canonical form, so existing fingerprints re-attest under schema."""
+    a = _make_config(temperature=0.0)
+    b = _make_config()
+    assert a.canonical_hash() == b.canonical_hash()
+
+
 # --- refusal_patterns wiring (P1-9) ---
 
 def test_refusal_patterns_default_none():
